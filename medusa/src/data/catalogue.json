@@ -1,0 +1,115 @@
+{
+  "$generated": "scripts/export-catalogue.mjs -- do not edit by hand",
+  "currency": "inr",
+  "terms": {
+    "shippingFlat": 79,
+    "freeShippingAbove": 999
+  },
+  "products": [
+    {
+      "handle": "herbal-shampoo",
+      "title": "Herbal Shampoo",
+      "sku": "HERBAL-SHAMPOO",
+      "size": "250 ml",
+      "status": "live",
+      "family": "hair",
+      "genericName": "Herbal shampoo (cosmetic)",
+      "price": 649
+    },
+    {
+      "handle": "hairfall-defense",
+      "title": "Hairfall Defense",
+      "sku": "HAIRFALL-DEFENSE",
+      "size": "200 ml",
+      "status": "live",
+      "family": "hair",
+      "genericName": "Herbal hair oil (cosmetic)",
+      "price": 749
+    },
+    {
+      "handle": "vitality",
+      "title": "Vitality",
+      "sku": "VITALITY",
+      "size": "200 ml",
+      "status": "soon",
+      "family": "within",
+      "genericName": "Herbal tonic",
+      "price": 899
+    },
+    {
+      "handle": "digestive-care",
+      "title": "Digestive Care",
+      "sku": "DIGESTIVE-CARE",
+      "size": "150 g",
+      "status": "soon",
+      "family": "within",
+      "genericName": "Herbal powder blend",
+      "price": 599
+    },
+    {
+      "handle": "sugar-balance",
+      "title": "Sugar Balance",
+      "sku": "SUGAR-BALANCE",
+      "size": "60 capsules",
+      "status": "soon",
+      "family": "within",
+      "genericName": "Herbal capsules",
+      "price": 699
+    }
+  ],
+  "promotions": [
+    {
+      "code": "FIRSTVALLEY",
+      "label": "10% off your first order",
+      "minSubtotal": 599,
+      "type": "percentage",
+      "value": 10,
+      "cap": 150
+    },
+    {
+      "code": "TWOBOTTLES",
+      "label": "₹150 off two bottles or more",
+      "minSubtotal": 1200,
+      "type": "fixed",
+      "value": 150
+    }
+  ],
+  "states": [
+    "Andaman and Nicobar Islands",
+    "Andhra Pradesh",
+    "Arunachal Pradesh",
+    "Assam",
+    "Bihar",
+    "Chandigarh",
+    "Chhattisgarh",
+    "Dadra and Nagar Haveli and Daman and Diu",
+    "Delhi",
+    "Goa",
+    "Gujarat",
+    "Haryana",
+    "Himachal Pradesh",
+    "Jammu and Kashmir",
+    "Jharkhand",
+    "Karnataka",
+    "Kerala",
+    "Ladakh",
+    "Lakshadweep",
+    "Madhya Pradesh",
+    "Maharashtra",
+    "Manipur",
+    "Meghalaya",
+    "Mizoram",
+    "Nagaland",
+    "Odisha",
+    "Puducherry",
+    "Punjab",
+    "Rajasthan",
+    "Sikkim",
+    "Tamil Nadu",
+    "Telangana",
+    "Tripura",
+    "Uttar Pradesh",
+    "Uttarakhand",
+    "West Bengal"
+  ]
+}

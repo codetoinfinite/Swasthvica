@@ -1,0 +1,28 @@
+{
+  "$comment": [
+    "GST classification. Hand-authored, and deliberately unfilled.",
+    "Every value here is statutory: the HSN a product is classified under, and the total GST rate",
+    "that classification carries. Both are the client's CA's call. A guessed HSN produces a tax",
+    "invoice that cannot be filed and a rate that is wrong in one direction or the other, so this",
+    "file ships empty and `npm run seed:gst` refuses to run until it is filled in.",
+    "",
+    "`rates` maps an HSN code to the TOTAL GST percentage for it -- 18, not 9. The india-gst",
+    "provider splits that into CGST and SGST at half each for a delivery inside the seller's state,",
+    "or charges it whole as IGST for one outside it.",
+    "",
+    "`products` maps a storefront slug (which is the Medusa product handle) to its HSN. Every slug",
+    "in catalogue.json must appear here, and every HSN used here must appear in `rates`.",
+    "",
+    "After the first seed Medusa owns these numbers: they become tax_rate rows the client can edit",
+    "in Settings -> Tax Regions, and re-seeding will not overwrite them. `npm run check:catalogue`",
+    "reports a rate in the database that no longer matches this file rather than changing either."
+  ],
+  "rates": {},
+  "products": {
+    "herbal-shampoo": null,
+    "hairfall-defense": null,
+    "vitality": null,
+    "digestive-care": null,
+    "sugar-balance": null
+  }
+}

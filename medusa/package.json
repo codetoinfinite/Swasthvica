@@ -1,0 +1,44 @@
+{
+  "name": "swasthvica-medusa",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Commerce backend for Swasthvica. Owns price, stock, orders, promotions, tax and fulfilment; the storefront owns editorial.",
+  "scripts": {
+    "build": "medusa build",
+    "start": "medusa start",
+    "dev": "medusa develop",
+    "seed": "medusa exec ./src/scripts/seed.ts",
+    "check:catalogue": "medusa exec ./src/scripts/check-catalogue.ts",
+    "seed:gst": "medusa exec ./src/scripts/seed-gst.ts",
+    "seed:promotions": "medusa exec ./src/scripts/seed-promotions.ts",
+    "check:promotions": "medusa exec ./src/scripts/check-promotions.ts",
+    "test:unit": "TEST_TYPE=unit NODE_OPTIONS=--experimental-vm-modules jest --silent --runInBand --forceExit",
+    "test:integration:http": "TEST_TYPE=integration:http NODE_OPTIONS=--experimental-vm-modules jest --silent=false --runInBand --forceExit",
+    "test:integration:modules": "TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --runInBand --forceExit"
+  },
+  "dependencies": {
+    "@medusajs/admin-sdk": "2.19.0",
+    "@medusajs/cli": "2.19.0",
+    "@medusajs/framework": "2.19.0",
+    "@medusajs/medusa": "2.19.0"
+  },
+  "devDependencies": {
+    "@medusajs/test-utils": "2.19.0",
+    "@swc/core": "^1.7.28",
+    "@swc/jest": "^0.2.36",
+    "@types/jest": "^29.5.13",
+    "@types/node": "^20.12.11",
+    "@types/react": "^18.3.2",
+    "@types/react-dom": "^18.2.25",
+    "jest": "^29.7.0",
+    "prop-types": "^15.8.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.2",
+    "vite": "^5.4.14"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- The mark from src/components/dom/Logo.tsx, redrawn for 16px.
+       Same ring, same dew drop, same sprig, but every stroke roughly doubled and the six leaves
+       reduced to four: at a favicon's size the original 0.5px leaf outlines and 1.6px stem fall
+       below one device pixel and grey out into a smudge. The leaf fill is lifted from #4e5d3b to
+       #7c9155 for the same reason -- olive on olive-950 is a 1.4:1 contrast ratio, invisible in a
+       tab strip. Replaces a 25.9KB .ico with 1KB of markup. -->
+  <rect width="64" height="64" rx="14" fill="#10150c"/>
+  <g stroke="#c9a24a" stroke-width="3.6" stroke-linecap="round" fill="none">
+    <path d="M 37.5 10.4 A 22 22 0 1 1 26.5 10.4"/>
+  </g>
+  <circle cx="32" cy="9" r="4.2" fill="#c9a24a"/>
+  <g fill="#7c9155">
+    <path d="M32 47 V 24" fill="none" stroke="#7c9155" stroke-width="3" stroke-linecap="round"/>
+    <path d="M32 30 C 25 27.5 21 22 21 16.5 C 28 18 31.5 22.5 32 28 Z"/>
+    <path d="M32 30 C 39 27.5 43 22 43 16.5 C 36 18 32.5 22.5 32 28 Z"/>
+    <path d="M32 42 C 26 40 22.5 35.5 22 31 C 28 32.5 31.5 36.5 32 40 Z"/>
+    <path d="M32 42 C 38 40 41.5 35.5 42 31 C 36 32.5 32.5 36.5 32 40 Z"/>
+  </g>
+</svg>
