@@ -6,8 +6,19 @@
  * Set NEXT_PUBLIC_SITE_URL in the deployment environment. The fallback is the intended
  * production domain, NOT localhost: a preview deploy that forgets the variable should still
  * emit share cards that point somewhere real rather than at a machine nobody can reach.
+ *
+ * Two things the environment does that `??` alone does not survive, both of them from the same
+ * gesture -- a hosting dashboard where somebody declares the variable and leaves the box empty,
+ * or pastes a domain with the slash the address bar shows.
+ *
+ * An empty string is NOT undefined, so `??` passes it straight through, and `new URL("")` in
+ * layout.tsx throws ERR_INVALID_URL during `Collecting page data` -- a build that fails on a
+ * variable the operator believes they have set. A trailing slash is quieter and worse: it never
+ * throws, and every one of the twenty-odd `${SITE_URL}/path` template strings in the sitemap and
+ * the JSON-LD graph silently emits a double slash, which a crawler reads as a different URL.
  */
-export const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? "https://swasthvica.com";
+const CONFIGURED_ORIGIN = process.env.NEXT_PUBLIC_SITE_URL?.trim().replace(/\/+$/, "");
+export const SITE_URL = CONFIGURED_ORIGIN || "https://swasthvica.com";
 
 /**
  * The share card, for the routes that declare their own `openGraph`.
