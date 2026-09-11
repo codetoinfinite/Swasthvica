@@ -5,7 +5,7 @@ import { fastNormals } from "./geoUtil";
 import { useFrame } from "@react-three/fiber";
 import { motionPrefs } from "@/lib/frameData";
 import { quality } from "@/lib/quality";
-import { rampTexture } from "./texUtil";
+import { ANISOTROPY, rampTexture } from "./texUtil";
 import { useSliced } from "@/lib/build-queue";
 import { WIND, dressLeaf, frondTexture, rng } from "./foliage";
 import { groundHeight, ss01 } from "./terrain";
@@ -155,7 +155,7 @@ function canopyTexture(l: Layer) {
   // edge, so the lobe has to be the size of a clump of leaves — a tenth of a metre — and the tree
   // has to be the cluster rather than the lobe.
   const rnd = rng(Math.round(l.seed * 1013) + 7);
-  for (let wx = -l.w / 2 - 1; wx <= l.w / 2 + 1; ) {
+  for (let wx = -l.w / 2 - 1; wx <= l.w / 2 + 1;) {
     const env = envAt(wx);
     const spread = (0.5 + 1.45 * env) * (0.75 + 0.5 * rnd());
     const top = crown(wx) + (rnd() - 0.5) * 0.55 * (0.35 + env);
@@ -174,15 +174,49 @@ function canopyTexture(l: Layer) {
       lobe(px, py, 0.46 * spread * sc, 0.4 * spread * sc);
     }
     // stepped by angle rather than sampled at random: a rim of n random lobes leaves n/e-sized
-    // holes on the edge, and a hole on the edge is a bite out of the tree
-    const rim = 34 + Math.round(26 * env);
+    // holes on the edge, and a hole on the edge is a bite out of the tree.
+    //
+    // The rim is drawn TWICE, at two scales, and that is the whole point of it. The pass before
+    // this one put every rim lobe in a thin annulus at 0.82-1.04 of the spread and gave them all a
+    // radius inside a 1.83:1 band, which on the near layer is a ring of thirty-odd circles between
+    // 29 and 54 device pixels across, all the same size, evenly spaced by angle. That is not a
+    // canopy edge, it is a scallop -- and captured at 2x it read exactly as what it is, a chain of
+    // soft equal bubbles. No amount of shader noise fixes that, because the shader can only wander
+    // the crossing point of the alpha ramp by a couple of pixels and the arcs are twenty times
+    // that. The circles have to stop being drawn.
+    //
+    // So: radius comes off a cubed uniform, which puts the median at 0.097 m and the top decile at
+    // 0.30, a 5.5:1 spread with most of the population at the small end -- no single arc radius
+    // can dominate the outline when the radii are drawn from a heavy tail. The annulus widens to
+    // 0.70-1.12 so the centres do not lie on a circle either. And each rim lobe then hangs two
+    // smaller ones off itself at a third of its radius, which is the cheapest possible second
+    // generation: every arc a coarse lobe contributes is interrupted by a finer one, and an arc
+    // that is interrupted is no longer read as a circle.
+    //
+    // Floored at 1.8 texels. A lobe finer than about two texels is a grey smudge on a 2048 sheet,
+    // not a shape, and after the l.soft blur it is nothing at all -- the sheet's resolution is the
+    // real floor here and pretending otherwise just spends fills on invisible geometry. Everything
+    // finer than this belongs in the fragment, and that is where it now is.
+    const rim = 20 + Math.round(16 * env);
     for (let k = 0; k < rim; k++) {
-      const a = ((k + 0.35 * rnd()) / rim) * Math.PI * 2;
-      const rad = spread * (0.82 + 0.22 * rnd());
-      const lr = (0.09 + 0.075 * rnd()) * (0.8 + 0.75 * env);
-      const px = tx(wx + Math.cos(a) * rad);
-      const py = ty(cy + Math.sin(a) * rad * 0.72);
-      lobe(px, py, lr * sc, lr * sc * 0.85);
+      const a = ((k + 0.5 * rnd()) / rim) * Math.PI * 2;
+      const rad = spread * (0.7 + 0.42 * rnd());
+      const u = rnd();
+      const lr = (0.055 + 0.34 * u * u * u) * (0.8 + 0.75 * env);
+      const cxw = wx + Math.cos(a) * rad;
+      const cyw = cy + Math.sin(a) * rad * 0.72;
+      lobe(tx(cxw), ty(cyw), Math.max(lr * sc, 1.8), Math.max(lr * sc * 0.85, 1.5));
+      for (let j = 0; j < 2; j++) {
+        const a2 = rnd() * Math.PI * 2;
+        const d2 = lr * (0.75 + 0.6 * rnd());
+        const lr2 = lr * (0.3 + 0.3 * rnd());
+        lobe(
+          tx(cxw + Math.cos(a2) * d2),
+          ty(cyw + Math.sin(a2) * d2 * 0.8),
+          Math.max(lr2 * sc, 1.8),
+          Math.max(lr2 * sc * 0.85, 1.5),
+        );
+      }
     }
     // One blob for the tree that was just built. Brightness is mostly per-tree luck -- how much
     // canopy is between this crown and the sky -- with a lift for the ones standing where the
@@ -206,14 +240,24 @@ function canopyTexture(l: Layer) {
     const spread = 0.42 + 0.34 * rnd();
     lobe(tx(wx), ty(cy), 0.62 * spread * sc, 0.5 * spread * sc);
     crownBlob(tx(wx), ty(cy), spread * sc * 1.5, 0.08 + 0.14 * rnd());
-    const rim = 22;
+    const rim = 16;
     for (let j = 0; j < rim; j++) {
-      const a = ((j + 0.4 * rnd()) / rim) * Math.PI * 2;
-      const rad = spread * (0.8 + 0.24 * rnd());
-      const lr = 0.07 + 0.055 * rnd();
-      const px = tx(wx + Math.cos(a) * rad);
-      const py = ty(cy + Math.sin(a) * rad * 0.65);
-      lobe(px, py, lr * sc, lr * sc * 0.85);
+      const a = ((j + 0.5 * rnd()) / rim) * Math.PI * 2;
+      const rad = spread * (0.68 + 0.44 * rnd());
+      const u = rnd();
+      const lr = 0.045 + 0.26 * u * u * u;
+      const cxw = wx + Math.cos(a) * rad;
+      const cyw = cy + Math.sin(a) * rad * 0.65;
+      lobe(tx(cxw), ty(cyw), Math.max(lr * sc, 1.8), Math.max(lr * sc * 0.85, 1.5));
+      const a2 = rnd() * Math.PI * 2;
+      const d2 = lr * (0.75 + 0.6 * rnd());
+      const lr2 = lr * (0.32 + 0.3 * rnd());
+      lobe(
+        tx(cxw + Math.cos(a2) * d2),
+        ty(cyw + Math.sin(a2) * d2 * 0.8),
+        Math.max(lr2 * sc, 1.8),
+        Math.max(lr2 * sc * 0.85, 1.5),
+      );
     }
     // rect() and ellipse() both trace clockwise in a y-down canvas, so the sliver unions with
     // the crown instead of punching a hole in it
@@ -261,14 +305,30 @@ function canopyTexture(l: Layer) {
       // of highlight and shade -- which is what the pass before this ran -- puts as much bright
       // speckle on a backlit crown as a front-lit one and reads as snow.
       const lift = k > 0.66;
-      _cc.copy(BASE).lerp(lift ? LIT : BLACK, lift ? 0.1 + 0.3 * grn() : 0.18 + 0.4 * grn());
+      _cc.copy(BASE).lerp(lift ? LIT : BLACK, lift ? 0.05 + 0.15 * grn() : 0.09 + 0.2 * grn());
       cctx.fillStyle = `#${_cc.getHexString()}`;
-      // Size was never the problem: a 2 texel speck on this sheet lands about 3.6 screen pixels
-      // wide on the near layer. Contrast was, in both directions in turn.
-      cctx.globalAlpha = 0.26 + 0.36 * grn();
-      const r = 1.1 + 2.1 * grn();
+      /* Size WAS the problem, and this comment used to say it was not.
+         
+         A speck of radius r lands 1.7r * 4.13 device pixels across on the near layer, so the old
+         1.1-to-3.2 texel radius arrived between eight and twenty-two pixels wide, and the colour
+         blur spread it further. Sampled over the tree line in the hero frame, the tenth and
+         ninetieth percentiles of that band were rgb(32,33,18) and rgb(94,101,63): a three-to-one
+         luminance ratio at a blob scale of twenty to forty pixels. That is a camouflage pattern.
+         It is not what a canopy sixteen metres away looks like -- atmospheric perspective flattens
+         local contrast with distance, it does not raise it.
+         
+         The specks were sized and weighted when they were the ONLY thing drawing leaves. They are
+         not any more: `dressCanopy` puts three equal bands at ten screen pixels per cell into the
+         fragment, where there is no sheet to run out of. Two systems drawing the same feature at
+         different scales, and the coarse one wins every time it is seen. So the painted pass drops
+         back to what a 2048 sheet can actually resolve -- 0.55 to 1.4 texels, i.e. four to nine
+         device pixels, the finest this magnification permits -- at roughly half the old contrast,
+         and stops competing. Coverage falls with the area and that is the point: this is now a
+         sparse break-up under the shader's leaf band, not the leaf band itself. */
+      cctx.globalAlpha = 0.18 + 0.24 * grn();
+      const r = 0.55 + 0.85 * grn();
       cctx.beginPath();
-      cctx.ellipse(gx, gy, r * 1.7, r, grn() * Math.PI, 0, Math.PI * 2);
+      cctx.ellipse(gx, gy, r * 1.6, r, grn() * Math.PI, 0, Math.PI * 2);
       cctx.fill();
     }
     cctx.globalAlpha = 1;
@@ -286,17 +346,295 @@ function canopyTexture(l: Layer) {
   cbctx.drawImage(col, 0, 0);
   const colTex = new THREE.CanvasTexture(cb);
   colTex.colorSpace = THREE.SRGBColorSpace;
-  colTex.anisotropy = 8;
+  colTex.anisotropy = ANISOTROPY;
 
   return { alpha: rampTexture(b), color: colTex };
+}
+
+/* The sheet cannot carry detail finer than one texel, and one texel is not small enough.
+
+   quality().texSize is 2048 across a 52 m sheet standing 16 m from the camera, so the map holds
+   39.4 texels per world unit while the screen, at fov 35 and dpr 2, holds 1640 / (2 * 16 *
+   tan(17.5 deg)) = 162.6 device pixels per world unit. The map is MAGNIFIED 4.13x. Layers 1 and 2
+   are worse -- 4.83x and 5.28x -- because they are wider without being proportionally further
+   away. The grain painted into the canvas at two to six texels therefore arrives on screen nine to
+   thirty-four pixels across, and that is what the soft blobs in the tree line are. They are not a
+   blur. They are leaf specks at four times zoom.
+
+   Measured on the hero frame over a 400x380 px box of background canopy: mean |dL/dx| 2.24, mean
+   |dL/dy| 2.46, luma sd 16.9. Isotropic, so nothing is smeared -- but a scanline across it holds
+   the same value for twenty pixels at a stretch. There is no high-frequency content in the picture
+   at all.
+
+   The obvious fix is a bigger sheet and it is the wrong one: 4096 puts three layers x two maps x
+   mips at roughly 128 MB of texture and about 168,000 canvas ellipse fills on the main thread at
+   mount, which is the load hitch this scene has already been through once.
+
+   A shader has no resolution. This adds the missing octaves in the fragment, keyed off world
+   position rather than uv, so the frequencies mean metres of canopy and read identically on all
+   three layers whatever their sheet scale. Each octave fades itself out by its own on-screen size,
+   so the far layer stops drawing the leaf band before it can alias. */
+function dressCanopy(mat: THREE.MeshBasicMaterial | null, l: Layer) {
+  if (!mat || mat.userData.canopy) return;
+  mat.userData.canopy = true;
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uCW = { value: l.w };
+    shader.uniforms.uCH = { value: l.h };
+    shader.uniforms.uCSeed = { value: l.seed };
+    shader.uniforms.uCGain = { value: 7.0 };
+    // Contrast, in stops, plus the normaliser that keeps exp2 of a signed field from lifting the
+    // mean. Distance flattens local contrast, and haze is already this scene's per-layer distance
+    // scalar, so it scales the stops rather than a second constant being invented for it.
+    //
+    // sigma of the log multiplier is ln2 * stops * sd(cD). sd(cD) is about 0.51: the weights below
+    // give cF an sd near 0.079, uCGain 7.0 takes that to 0.55, and clamping a Gaussian at 1.8 sigma
+    // keeps about 93% of its spread. uCNorm is exp(-sigma^2 / 2), the log-normal mean correction --
+    // without it the tree line brightens by a third as a side effect of being given texture.
+    const stops = 1.52 * (1 - 0.9 * l.haze);
+    const sigma = Math.LN2 * stops * 0.51;
+    shader.uniforms.uCStops = { value: stops };
+    shader.uniforms.uCNorm = { value: Math.exp(-0.5 * sigma * sigma) };
+    shader.uniforms.uCEdge = { value: 0.9 - 1.6 * l.haze };
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+          uniform float uCW;
+          uniform float uCH;
+          uniform float uCSeed;
+          uniform float uCGain;
+          uniform float uCStops;
+          uniform float uCNorm;
+          uniform float uCEdge;
+          // 2D, not the bark's 3D: this surface is a plane, so the third dimension would be four
+          // extra hash calls an octave to interpolate along an axis nothing ever moves on.
+          float cHash(vec2 p) {
+            p = fract(p * vec2(0.3183099, 0.3678794) + vec2(0.71, 0.113));
+            p *= 17.0;
+            return fract(p.x * p.y * (p.x + p.y));
+          }
+          float cNoi(vec2 p) {
+            vec2 i = floor(p), f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            return mix(mix(cHash(i), cHash(i + vec2(1.0, 0.0)), f.x),
+                       mix(cHash(i + vec2(0.0, 1.0)), cHash(i + vec2(1.0, 1.0)), f.x), f.y);
+          }`,
+      )
+      .replace(
+        "#include <alphamap_fragment>",
+        `#include <alphamap_fragment>
+
+          // Nothing below is worth running on a fragment the blend will throw away, and on these
+          // sheets that is most of them: every plane is wider than the frustum and the silhouette
+          // only fills the upper band of it. At eight bits this alpha cannot tint anything anyway.
+          if (diffuseColor.a < 0.002) discard;
+
+          // uv back into metres of canopy. Every frequency below is then quoted as 1/cell in
+          // metres, which is the only unit in which "leaf" and "branch mass" mean anything. The
+          // seed offset separates the three layers; without it they would share one field and the
+          // tree line would look combed.
+          vec2 cW = vec2((vMapUv.x - 0.5) * uCW, (vMapUv.y - 0.5) * uCH) + uCSeed * 7.3;
+
+          // Metres of canopy per device pixel. fwidth(cW.x) is the horizontal step and fwidth(cW.y)
+          // the vertical, so the mean of the two is the pixel footprint. length(fwidth(cW)) -- what
+          // the bark shader uses, correctly, on a curved surface sampled in three axes -- would
+          // read sqrt(2) too large on a flat plane facing the camera.
+          float cPx = max(0.5 * (fwidth(cW.x) + fwidth(cW.y)), 1e-6);
+
+          // An octave of cell size c spans c/cPx pixels, so the gate argument is 1 / pixels-per-cell:
+          // full amplitude at 10 px a cell, gone by 3.6. The bark retires an octave far later, at
+          // 5.6 down to 2.2, and it can afford to -- its noise is sampled in three axes off a curved
+          // surface, so its lattice never lines up with the screen. cNoi is a two-dimensional
+          // lattice on a plane facing the camera, and its cells arrive on screen axis-aligned and
+          // all the same size. Below about five pixels that does not read as fine grain, it reads as
+          // squares, which is the one thing this whole pass exists to remove. 20 is 1/0.05 m and 50
+          // is 1/0.02 m; on the near layer those are 8.1 and 3.3 px, so the last one is now off.
+          float cG3 = 1.0 - smoothstep(0.10, 0.28, cPx * 20.0);
+          float cG4 = 1.0 - smoothstep(0.10, 0.28, cPx * 50.0);
+          // 22 is 1/0.045 m: 7.3 px on the near layer, 4.7 on the far. This one is for the
+          // SILHOUETTE, where an octave is allowed to live nearer the floor than it may on albedo
+          // -- an edge that wobbles at four pixels reads as a ragged edge, where a fill that
+          // mottles at four pixels reads as squares.
+          float cG5 = 1.0 - smoothstep(0.10, 0.28, cPx * 22.0);
+
+          // Five bands, chosen as the canopy's anatomy rather than as an octave ladder for its own
+          // sake. 0.9 m is the mass hanging off one big branch; 0.34 m a branchlet cluster; 0.13 m
+          // a clump of leaves; 0.05 m a single leaf; 0.02 m the gap between two. On the near layer
+          // those land at 146, 55, 21, 8.1 and 3.3 device pixels; on the far layer at 94, 35, 13.5,
+          // 5.2 and 2.1, which is why the last two are gated and the last one is off back there.
+          //
+          // The weights are lopsided towards the fine end on purpose, and this is where the first
+          // version of this pass went wrong. It ran 0.12 / 0.20 / 0.30 / 0.26 / 0.11, which puts
+          // the loudest bands at 55 and 21 px -- branchlet and clump scale. The sheet ALREADY owns
+          // that scale: its painted specks are 4 to 11 texels, which is 0.10 to 0.28 m, arriving 16
+          // to 46 px across. So two sources were drawing the same octave and the shader was louder,
+          // and the result was a two-tone blob field -- camouflage netting laid over a perfectly
+          // good tree line. The eye reads whichever band is loudest, so the loudest band has to be
+          // the one nothing else is drawing.
+          //
+          // At 162.6 device px per metre one 6 cm leaf is 9.8 px, so 0.05 m IS the leaf band and it
+          // keeps the largest weight. 0.13 m is the band that gets cut, from 0.22 down to 0.05. At
+          // 21 px it sits between the sheet's painted specks -- 4 to 10 px, since those were taken
+          // down to leaf size -- and the crown lobes the alpha map draws at several hundred, so it
+          // is the one rung of the ladder that no other system is drawing AND that the eye reads as
+          // pattern rather than as light. It was the blob scale in every capture of this pass.
+          //
+          // The two coarse bands go the other way, 0.03/0.06 up to 0.12/0.12. At 146 and 55 px they
+          // are not pattern at all, they are the light falling off across one branch mass, and the
+          // painted sheet cannot supply them: its colour map is blurred at l.soft and its own
+          // low-frequency content is the crown silhouette, not shading inside the crown. Two thirds
+          // of the variance still sits on the leaf band.
+          //
+          // Deliberately NOT renormalised by the live weights, unlike the bark: this field WANTS to
+          // lose amplitude as its fine octaves gate out, because a canopy 25 m away genuinely does
+          // have less local contrast than one 16 m away. Every term is centred on zero, so the sum
+          // is centred too no matter which terms survive.
+          //
+          // Split, because shadow and highlight in a canopy do not live at the same scale. What
+          // casts is a branch mass; what catches is one leaf. Driving both off the whole field
+          // gave pale continents forty pixels across -- lichen on a rock, or camouflage netting.
+          // Blades, not blobs. A square lattice interpolated with smoothstep can only produce one
+          // shape -- an axis-aligned cell with rounded corners -- and a field of those at ten
+          // pixels apiece is a camouflage swatch no matter what amplitude it is given. A canopy is
+          // not made of cells, it is made of blades: a leaf here is 6 cm by 2.5 cm, so 10 px by
+          // 4.6 px. Rotating the sample coordinate and stretching the axis across the blade by 2.2
+          // gives the lattice that aspect for two multiplies and no extra samples. The two fine
+          // leaf band is sampled at THREE angles -- 24, -58 and 82 degrees -- with equal weight, and
+          // the equal weight is the point. The first attempt ran one band at 0.34 and a finer one
+          // at 0.11, and 0.34 against 0.11 is not a crossing, it is a winner: the whole canopy came
+          // out raked in a single diagonal, brushed metal rather than foliage. Three at a third of
+          // the energy each leaves no direction dominant, and 24/-58/82 are near-equally spaced
+          // modulo 180 so no pair reinforces. Quadrature of three 0.20 terms is 0.35, which is the
+          // amplitude the single 0.34 band had, so this costs two extra samples and no contrast.
+          // Constants are cos/sin of the angles, folded in rather than computed.
+          vec2 cB1 = vec2(cW.x * 0.9135 + cW.y * 0.4068, (cW.y * 0.9135 - cW.x * 0.4068) * 2.2);
+          vec2 cB2 = vec2(cW.x * 0.5299 - cW.y * 0.8480, (cW.y * 0.5299 + cW.x * 0.8480) * 2.2);
+          vec2 cB3 = vec2(cW.x * 0.1392 + cW.y * 0.9903, (cW.y * 0.1392 - cW.x * 0.9903) * 2.2);
+
+          float cFc = 0.12 * (cNoi(cW * 1.11) - 0.5)
+                    + 0.12 * (cNoi(cW * 2.94 + 17.3) - 0.5)
+                    + 0.05 * (cNoi(cW * 7.69 + 41.9) - 0.5);
+          float cFf = 0.20 * cG3 * (cNoi(cB1 * 16.0 + 73.1) - 0.5)
+                    + 0.20 * cG3 * (cNoi(cB2 * 16.0 + 205.3) - 0.5)
+                    + 0.20 * cG3 * (cNoi(cB3 * 16.0 + 331.7) - 0.5)
+                    + 0.11 * cG4 * (cNoi(cB2 * 40.0 + 121.7) - 0.5);
+          float cF = cFc + cFf;
+
+          // Linear through the middle, clipped only in the tails. cF has an sd near 0.079 with the
+          // weights above, so uCGain 7.0 puts the [-1, 1] window at 1.8 sigma: the corners are the
+          // deepest gaps and the brightest crowns, and everything between them keeps its gradient.
+          // What was here before was a smoothstep, and a smoothstep on smooth noise is not a
+          // shading term, it is a contour -- it flattens everything past each knee to one value and
+          // hands back a two-tone map with soft borders, which is how a camouflage pattern is made.
+          float cD = clamp(cF * uCGain, -1.0, 1.0);
+
+          // Light multiplies. The term this replaces added, and that was the whole camouflage read.
+          // It ran
+          //   diffuseColor.rgb * cSh + diffuse * vec3(0.487, 0.559, 0.187) * cHi
+          // with cHi reaching 0.30 and diffuse near white on the near layer, so it laid up to +0.15
+          // of LINEAR radiance onto a canopy whose own linear radiance is about 0.019. That is an
+          // eightfold lift, and its gate -- clamp(cFf * gain * 2.4) with an sd of 0.70 -- fired
+          // fully on about fifteen percent of the sheet, so it arrived as flat pale blobs with hard
+          // shoulders. Measured over a 150x380 px box of tree line: luma mean 59, sd 25.6, max 145,
+          // against the same box with the gain zeroed reading mean 42, sd 5.2. 43% RMS contrast in
+          // blobs twenty to forty pixels across is netting, not foliage, and the additive term
+          // built essentially all of it.
+          //
+          // exp2 of the signed field is the same intent stated multiplicatively: it cannot go
+          // negative, it is symmetric in stops rather than in radiance, and the display transfer
+          // curve is what undoes it, so the contrast lands where the eye is. sRGB relative contrast
+          // works out at ln2 * stops * sd(cD) / 2.2, and 1.49 stops against sd(cD) 0.51 gives 24%,
+          // which on a mean near 45 is an sd around 11 -- twice the sheet's own, and well under
+          // half what the additive version produced. uCNorm cancels the log-normal mean lift.
+          //
+          // The colour swing is the other half of reading as foliage rather than as a grey mask
+          // over green: a leaf in sun goes yellower, a leaf in shade takes the sky. Six percent
+          // either way, one mix, driven off the same field so hue and value stay in register.
+          diffuseColor.rgb *= exp2(cD * uCStops) * uCNorm
+            * mix(vec3(0.94, 0.98, 1.06), vec3(1.06, 1.03, 0.90), 0.5 + 0.5 * cD);
+
+          // And the silhouette, which is where a canopy is actually read. 4a(1-a) confines the
+          // whole perturbation to the ramp -- it is 1 at the middle of the transition and 0 at both
+          // ends -- so the silhouette stays where it was drawn and only its crossing point wanders.
+          // The ramp is about 10 device px wide on the near layer and 32 on the far one, which
+          // makes alpha a displacement in disguise: on the near layer 0.1 of alpha is one pixel of
+          // tree line. That conversion is the only reason any of the numbers below are pickable.
+          //
+          // What was here was ONE octave at 0.29 m and uCEdge 0.87. (cNoi - 0.5) has an sd near
+          // 0.17, so that term's sd was 0.15 of alpha: one and a half pixels of wander, at a 47 px
+          // wavelength, against painted lobes 29 to 54 px across. It could not have broken them
+          // and it did not -- the tree line came out as a chain of soft equal circles. The sheet
+          // side of that is fixed above; this side needs both more amplitude and, mainly, octaves
+          // the sheet has no way to draw.
+          //
+          // Weights are quoted so the quadrature works out where it is wanted: (cNoi - 0.5) * 2 has
+          // an sd near 0.34, so 0.34 * sqrt(0.50^2 + 0.62^2 + 0.50^2) * uCEdge lands at 0.28 of
+          // alpha -- 2.8 px of wander on the near layer, an order up on what it was, with two
+          // thirds of the energy at 0.11 m and 0.045 m where the painted sheet has nothing. The
+          // middle and fine octaves are sampled in the blade spaces, so a bite out of the tree line
+          // is leaf-shaped and raked, not a round nibble; and they are gated, because a silhouette
+          // that wobbles below two pixels a cell is not a ragged edge, it is a sparkling one.
+          float cA = 4.0 * diffuseColor.a * (1.0 - diffuseColor.a);
+          float cE = 0.50 * (cNoi(cW * 3.4 + 5.7) - 0.5) * 2.0
+                   + 0.62 * cG3 * (cNoi(cB1 * 9.1 + 63.3) - 0.5) * 2.0
+                   + 0.50 * cG5 * (cNoi(cB2 * 22.0 + 149.1) - 0.5) * 2.0;
+          diffuseColor.a = clamp(diffuseColor.a + cA * (uCEdge * cE + 0.7 * cF), 0.0, 1.0);`,
+      );
+  };
+  // All three layers compile to the same source and differ only in uniforms, so one key is correct
+  // and lets them share a program.
+  mat.customProgramCacheKey = () => "canopy";
+  mat.needsUpdate = true;
 }
 
 // low sits under the far ridge crests (they read at ~4.2 deg above the camera axis at the offer
 // vantage, these at ~2.6-3.2) so the range still shows through the gap over the river
 const CANOPY: Layer[] = [
-  { z: -7, w: 52, h: 13, y: 3.4, low: 1.35, high: 7.6, gapIn: 2.6, gapOut: 5.4, cx: -0.8, seed: 1.3, soft: 0.55, color: "#1d2a14", haze: 0.02 },
-  { z: -11, w: 76, h: 17, y: 4.2, low: 1.7, high: 8.4, gapIn: 3.6, gapOut: 8.2, cx: 1.5, seed: 5.4, soft: 0.9, color: "#26331a", haze: 0.12 },
-  { z: -16, w: 104, h: 21, y: 5.0, low: 2.0, high: 9.0, gapIn: 5.0, gapOut: 12.0, cx: -2.4, seed: 9.1, soft: 1.4, color: "#303d22", haze: 0.28 },
+  {
+    z: -7,
+    w: 52,
+    h: 13,
+    y: 3.4,
+    low: 1.35,
+    high: 7.6,
+    gapIn: 2.6,
+    gapOut: 5.4,
+    cx: -0.8,
+    seed: 1.3,
+    soft: 0.55,
+    color: "#1d2a14",
+    haze: 0.02,
+  },
+  {
+    z: -11,
+    w: 76,
+    h: 17,
+    y: 4.2,
+    low: 1.7,
+    high: 8.4,
+    gapIn: 3.6,
+    gapOut: 8.2,
+    cx: 1.5,
+    seed: 5.4,
+    soft: 0.9,
+    color: "#26331a",
+    haze: 0.12,
+  },
+  {
+    z: -16,
+    w: 104,
+    h: 21,
+    y: 5.0,
+    low: 2.0,
+    high: 9.0,
+    gapIn: 5.0,
+    gapOut: 12.0,
+    cx: -2.4,
+    seed: 9.1,
+    soft: 1.4,
+    color: "#303d22",
+    haze: 0.28,
+  },
 ];
 
 /* ------------------------------------------------------------------ trunks */
@@ -446,7 +784,7 @@ function dressBark(mat: THREE.MeshStandardMaterial | null, t: Trunk) {
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
-        "#include <common>\nvarying vec3 vObj;\nvarying vec3 vTanV;\nvarying vec3 vCylV;"
+        "#include <common>\nvarying vec3 vObj;\nvarying vec3 vTanV;\nvarying vec3 vCylV;",
       )
       .replace(
         "#include <begin_vertex>",
@@ -458,7 +796,7 @@ function dressBark(mat: THREE.MeshStandardMaterial | null, t: Trunk) {
           // The SMOOTH cylinder normal, kept clear of the fissure bumping that happens downstream.
           // Roundness is a metre-scale fact and the relief is a centimetre-scale one; reading the
           // first off the second is why the trunks were flat.
-          vCylV = normalize(normalMatrix * normalize(vec3(position.x, 0.0, position.z)));`
+          vCylV = normalize(normalMatrix * normalize(vec3(position.x, 0.0, position.z)));`,
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
@@ -494,7 +832,7 @@ function dressBark(mat: THREE.MeshStandardMaterial | null, t: Trunk) {
                   + 0.13 * w.z * bNoi(p * 8.11 + 73.7))
                  / (0.44 + 0.26 * w.x + 0.17 * w.y + 0.13 * w.z);
           }
-          float bFbm2(vec3 p) { return 0.62 * bNoi(p) + 0.38 * bNoi(p * 2.11 + 7.7); }`
+          float bFbm2(vec3 p) { return 0.62 * bNoi(p) + 0.38 * bNoi(p * 2.11 + 7.7); }`,
       )
       .replace(
         "#include <map_fragment>",
@@ -513,15 +851,56 @@ function dressBark(mat: THREE.MeshStandardMaterial | null, t: Trunk) {
           //
           // The scale is measured, not guessed. Every trunk in the scene subtends about the same
           // width -- the near ones thinner and closer, the far ones fatter and further -- and that
-          // width is 132 device pixels for 0.40 m of diameter, so a pixel is 3.0 mm of surface. A
-          // 3 cm furrow pitch therefore lands at ten pixels, which is the finest pitch that still
-          // reads as a channel instead of as grain; 33 is 1/0.03. The old 16 put the pitch at
-          // 20 px, one furrow every fifth of the trunk, which is stripes.
+          // width is 176 device pixels for 0.40 m of diameter, so a pixel is 2.27 mm of surface. A
+          // 3 cm furrow pitch therefore lands at thirteen pixels, comfortably above the finest
+          // pitch that still reads as a channel instead of as grain; 33 is 1/0.03. The old 16 put
+          // the pitch at 26 px, one furrow every seventh of the trunk, which is stripes.
           //
-          // The 16:1 squash on y is what makes them channels at all: the base cell comes out 3 cm
-          // wide and half a metre tall, so a fissure runs most of the visible trunk rather than
-          // pooling into the blotches an isotropic field gives.
-          vec3 bP = vec3(vObj.x, vObj.y * 0.062, vObj.z) * 33.0 + uSeed;
+          // (That width and pixel size are the NATIVE numbers. The figures this block used to
+          // carry -- 132 px and 3.0 mm -- were measured while the drawing buffer was still being
+          // latched to 1.5x by the old performance monitor, so every on-screen size here was a
+          // third too coarse. See src/components/canvas/CanvasRoot.tsx for that bug.)
+          //
+          // The squash on y is what makes these channels rather than blotches, but 0.062 -- a
+          // 16:1 cell, 3 cm wide and half a metre tall -- was too much of it. Nothing on the trunk
+          // then varied vertically at all. Measured on the hero frame over a 130x480 px patch of
+          // the near trunk: mean |dL/dx| 3.45, mean |dL/dy| 0.45. Less than half a luminance level
+          // per pixel down the trunk, which is under the quantiser -- the surface was literally a
+          // set of vertical stripes, and that is the plywood read. 0.20 is 5:1, a cell 3 cm wide
+          // and 15 cm tall: 13 px by 66 px, so a fissure still runs as a channel but wanders and
+          // dies inside the visible trunk the way bark does.
+          vec3 bP = vec3(vObj.x, vObj.y * 0.20, vObj.z) * 33.0 + uSeed;
+
+          // The plate tone and the surface grain below are NOT channels and must not inherit the
+          // channel squash. They used to sample bP, so a 3.2 cm "plate" was 52 cm tall and a
+          // 1.3 cm "grain" was 20 cm tall -- neither varied over any plate the camera could see,
+          // and both arrived as one more set of vertical stripes on top of the fissures. Bark
+          // grain is fibre: aligned with the trunk, so anisotropic, but 2:1, not 16:1. Offset off
+          // uSeed by a different multiplier so the two fields are independent per trunk.
+          vec3 bPi = vec3(vObj.x, vObj.y * 0.45, vObj.z) * 33.0 + uSeed * 1.31;
+
+          // Everything FINER than a plate needs its own space. 2.2:1 is a fact about plate shape --
+          // plates are tall -- and the grain on the face of one is not. Measured on the near-right
+          // trunk: a luminance profile straight across gave mean |dL/dx| 3.60 against mean |dL/dy|
+          // 0.88, a 4:1 anisotropy with under one level of change per pixel DOWN the trunk, which is
+          // below the quantiser. Runs of eleven identical pixels between fissures. That is the same
+          // failure the plate grain was added to fix, arriving through a different door: the field
+          // was there, it just had no vertical frequency in it. 1.25:1.
+          vec3 bPg = vec3(vObj.x, vObj.y * 0.80, vObj.z) * 33.0 + uSeed * 2.07;
+
+          // And one field turned the other way up, 4.9 cm across by 1.4 cm tall, because the limb of
+          // a cylinder compresses in ONE direction only. bPx is sec(theta)/k, so at 52 degrees off
+          // the centre line a pixel already covers 7.1 mm and every octave above is gated away --
+          // correctly, they would alias -- and the outer third of every trunk goes perfectly smooth.
+          // A cell that is wide in x and z survives that compression: at 7.1 mm a pixel this one is
+          // still at seven times its own width, so it keeps varying vertically right out to where
+          // the silhouette turns away. That is also what real bark does at a limb, where the fibres
+          // crowd together across and stay separate along.
+          //
+          // 3.4:1 and no threshold anywhere near it. A HARD band across a trunk at this pitch is
+          // birch lenticels, or worse a ruled line -- see the cross-cracks below, which earn their
+          // sharpness by being warped first. This one is mottle and stays mottle.
+          vec3 bPb = vec3(vObj.x, vObj.y * 3.4, vObj.z) * 33.0 + uSeed * 0.83;
 
           // Octaves die by their ON-SCREEN size and the band has to be tight, because everything
           // below feeds a threshold. The old fade let the fourth octave through at 2.5 px a cell
@@ -546,36 +925,72 @@ function dressBark(mat: THREE.MeshStandardMaterial | null, t: Trunk) {
           // every point belonging to one or the other, which is what bark is.
           //
           // Where the level sits decides how much of the trunk is furrow, and that is arithmetic,
-          // not taste. Two surviving octaves of value noise at these weights give a field close to
-          // Gaussian about 0.5 with a standard deviation near 0.118, so a quarter of the surface
-          // falls below 0.5 - 0.674 sd = 0.420. The previous ramp's MIDPOINT was 0.435, which is
-          // 40% furrow: furrows as wide as the plates between them, i.e. stripes again.
+          // not taste. bFbm normalises by the sum of its live weights, so with w = (1.0, 0.561, 0)
+          // the numerator coefficients are (0.44, 0.26, 0.0954) over S = 0.795 and the field's sd
+          // is sqrt(0.44^2 + 0.26^2 + 0.0954^2)/S = 0.654 times the sd of one octave. Calibrating
+          // that single-octave sd off the previous tuning -- 0.118 at w = (0.985, 0.13, 0), where
+          // the same expression gives 0.710 -- puts it at 0.166, so this field's sd is 0.109 and a
+          // quarter of the surface falls below 0.5 - 0.6745 sd = 0.427.
+          //
+          // It was 0.420, which is right for sd 0.118. The third octave was arriving at a seventh
+          // of the weight it does now, because the drawing buffer was latched to 1.5x and bW.y
+          // read 0.13 where it now reads 0.561: at native resolution more of the field survives,
+          // the field is narrower, and the quarter-point moves up. 0.420 against sd 0.109 is 23%
+          // furrow, not 25%.
           //
           // The wall is bounded below by one pixel of field change so it can never alias at
           // distance, and by a constant so it stays a wall and not a hard step up close -- the
-          // dominant octave moves one standard deviation over about 5 px, so 0.026 either side is
-          // a wall two pixels wide.
-          float bWd = max(0.026, 1.15 * fwidth(bV));
-          float bHt = smoothstep(0.420 - bWd, 0.420 + bWd, bV);
+          // dominant octave moves one standard deviation over about 6.5 px at 2.27 mm a pixel, so
+          // 0.020 either side is a wall two and a half pixels wide. (0.026 was the same wall
+          // measured at 3.0 mm a pixel; rescaling by 2.27/3.0 is what keeps it two pixels.)
+          float bWd = max(0.020, 1.15 * fwidth(bV));
+          float bHt = smoothstep(0.427 - bWd, 0.427 + bWd, bV);
           float bH = 1.0 - (1.0 - bHt) * bDep;
 
           // Cross-cracks: the same noise squashed the other way, 3.8 cm between cracks vertically
-          // and 13 cm of run horizontally, thresholded tight so about an eighth of the surface is
-          // crack. Without them the plates are unbroken vertical straps running the whole trunk.
-          // Bark plates are short.
+          // and 13 cm of run horizontally. Without them the plates are unbroken vertical straps
+          // running the whole trunk. Bark plates are short.
           //
-          // Two octaves of noise on a regular lattice space themselves regularly, and 3.8 cm of
-          // regular horizontal line is not bark, it is the lenticel banding of a birch -- or worse,
-          // ruled lines. bQ.y is therefore warped by a slow field before it is sampled, which moves
-          // each crack up or down by as much as half its own spacing and destroys the beat.
+          // A SUB-LEVEL SET was the wrong shape for this and is what produced the ruled horizontal
+          // line. Thresholding bFbm2 below 0.335 does not give a crack, it gives the filled region
+          // under a contour, and the region a 3.3:1 anisotropic field puts under its own tail is a
+          // lens elongated along the low-gradient axis. Rendering bCk straight to albedo showed two
+          // of them on the near-right trunk at roughly 50 cm by 9 cm. Nine centimetres of solid
+          // black across a 62 cm trunk is not a crack, it is a wound, and its flat lower boundary
+          // is the line. The warp was never the problem -- the same picture showed the lens
+          // meandering 15 cm over its length, which is the warp working exactly as intended.
+          //
+          // What a crack actually is, is the CONTOUR ITSELF: a band of fixed width straddling one
+          // level. So this takes |bCkF - c| rather than bCkF, and sets the half-width from the
+          // field's own vertical gradient, giving a band a fixed number of MILLIMETRES tall instead
+          // of a fixed number of field units.
+          float bEps = 0.0016;
           vec3 bQ = vec3(vObj.x * 0.30, vObj.y, vObj.z * 0.30) * 26.0 + uSeed * 1.7;
-          bQ.y += 2.4 * (bNoi(vec3(vObj.x, vObj.y * 0.28, vObj.z) * 5.0 + uSeed) - 0.5);
+          // The warp field has to be FINER ACROSS than the trunk is wide, or it shifts the whole
+          // crack up and down as one piece and leaves it dead straight. At 5.0 its cells were 20 cm
+          // across, so a crack crossing the 61 cm of visible trunk saw three of them and arrived as
+          // a ruled line. 11.0 is 9.1 cm, near seven cells across the same span, and the y factor
+          // drops to 0.16 to keep each cell 57 cm tall so the warp stays a horizontal meander and
+          // does not turn into vertical noise of its own.
+          bQ.y += 2.6 * (bNoi(vec3(vObj.x, vObj.y * 0.16, vObj.z) * 11.0 + uSeed) - 0.5);
           float bCkF = bFbm2(bQ);
-          float bCkW = max(0.020, 1.15 * fwidth(bCkF));
-          // 0.335 rather than 0.364 puts about a twelfth of the surface in crack instead of an
-          // eighth: at an eighth they out-competed the vertical fissures they are supposed to
-          // interrupt, and the trunk read as horizontally scored.
-          float bCk = smoothstep(0.335 - bCkW, 0.335 + bCkW, bCkF);
+          float bCkFe = bFbm2(bQ + vec3(0.0, 26.0 * bEps, 0.0));
+          // field units per metre up the trunk. The floor stops a locally flat patch of the field
+          // from dividing the width out to the whole trunk.
+          float bCkGy = max(abs(bCkFe - bCkF) / bEps, 0.60);
+          // half of 11 mm, converted into field units. 11 mm is 2.5 px on the near-right trunk at
+          // 4.39 mm a pixel and 4.2 px on the near-left at 2.62 -- thin enough to read as a split
+          // in the bark, wide enough that neither of them dithers.
+          float bCkHW = 0.0055 * bCkGy;
+          // AA on a band has to stay narrower than the band, or the two walls meet in the middle
+          // and it never reaches full depth. Three tenths of the half-width, floored at a pixel and
+          // a tenth so that a far trunk's cracks fade out cleanly instead of sparkling.
+          float bCkAA = max(0.30 * bCkHW, 1.10 * fwidth(bCkF));
+          // 0.40, not the mean. A contour taken near the mean of a smooth field is one continuous
+          // line that runs the full width of everything it crosses -- the ruled line again, by
+          // another route. Out at about -1 sd the level set breaks into short closed loops, which
+          // is what a cross-crack is: a segment that starts and stops, not a band around the tree.
+          float bCk = smoothstep(bCkHW - bCkAA, bCkHW + bCkAA, abs(bCkF - 0.40));
           // and they only cut where a plate is actually standing proud
           bH *= mix(1.0, 0.48 + 0.52 * bCk, bHt * bDep);
 
@@ -586,28 +1001,53 @@ function dressBark(mat: THREE.MeshStandardMaterial | null, t: Trunk) {
           // dozen identical pixels between the fissures -- the plates were mathematically flat, and
           // flat plates with dark marks between them read as scratches on a tube, not as bark.
           // The cause was a gate: this grain was faded by bW.y, which belongs to a frequency four
-          // times its own, and at this distance bW.y is 0.07, so the grain was arriving at a third
-          // of one percent. Each scale now fades by ITS OWN on-screen size.
+          // times its own, and at this distance bW.y was 0.07, so the grain was arriving at a
+          // third of one percent. Each scale now fades by ITS OWN on-screen size.
           //
           // Two of them, and neither goes through a threshold -- straight onto albedo, so they stay
           // grain instead of becoming more edges. 3.2 cm is plate-width: it makes neighbouring
           // plates differently toned, which is most of what stops a bark field looking printed.
           // 1.3 cm is the surface of the plate itself, four pixels, comfortably clear of the
           // threshold's Nyquist.
-          float bGt1 = 1.0 - smoothstep(0.18, 0.45, bPx * 31.0);
-          float bGt2 = 1.0 - smoothstep(0.18, 0.45, bPx * 79.0);
-          float bPl = 0.66 + 0.68 * mix(0.5, bNoi(bP * 0.95 + 11.0), bGt1);
-          float bGr = 0.60 + 0.80 * mix(0.5, bNoi(bP * 2.4 + 3.3), bGt2);
-          diffuseColor.rgb *= 1.05 * bMot * bPl * bGr * (0.26 + 0.74 * bH);
+          // These gates are NOT the ones above. bW feeds a threshold, and a threshold handed a cell
+          // narrower than about five pixels dithers its own edge into grey, so it has to be retired
+          // early. These three go straight onto albedo, where the only limit is Nyquist -- and MSAA
+          // does not help, because it multisamples coverage and not the fragment shader, so Nyquist
+          // is the real two pixels a cell and not four. Full contrast at 3.3 px a cell, half at 2.2,
+          // gone at 1.67.
+          //
+          // The old band was the threshold's own -- full at 5.6 px a cell, dead at 2.2 -- and on the
+          // near-right trunk, where a pixel is 4.39 mm, that put the 1.26 cm grain at 2.9 px a cell
+          // and therefore at 30% weight. Three tenths of a nine-percent field is under three percent
+          // on an albedo of 52: a quarter of a luminance level, invisible. The plates were flat
+          // because the one term meant to break them up had been faded out for being sharp.
+          float bGt1 = 1.0 - smoothstep(0.30, 0.60, bPx * 31.0);
+          float bGt2 = 1.0 - smoothstep(0.30, 0.60, bPx * 79.0);
+          // 5.5 mm: 2.1 px on the near-left trunk at 2.62 mm a pixel, where it survives at about a
+          // third weight, and 1.25 px on the near-right, where it is correctly gone. This is the
+          // octave that exists ONLY for the trunks close enough to earn it.
+          float bGt3 = 1.0 - smoothstep(0.30, 0.60, bPx * 182.0);
+          // mix(0.5, n, w) rather than w * n so the mean stays at 0.5 however much of the octave
+          // survives -- a trunk must not brighten or darken as it recedes, only soften. Three
+          // independent fields at sd 0.078, 0.092 and 0.078 of the mean multiply out to 14% total,
+          // against the 8% the trunk had, nearly all of which was the slowest octave's ramp.
+          float bPl = 0.66 + 0.68 * mix(0.5, bNoi(bPi * 0.95 + 11.0), bGt1);
+          float bGr = 0.60 + 0.80 * mix(0.5, bNoi(bPg * 2.4 + 3.3), bGt2);
+          float bFn = 0.66 + 0.68 * mix(0.5, bNoi(bPg * 5.5 + 47.0), bGt3);
+          // 20.4 is 1/0.049, the across-trunk cell width -- the only figure a gate ever cares about,
+          // since aliasing is set by the compressed axis and this field's compressed axis is the
+          // wide one.
+          float bGt4 = 1.0 - smoothstep(0.30, 0.60, bPx * 20.4);
+          float bBd = 0.72 + 0.56 * mix(0.5, bNoi(bPb * 0.62 + 29.0), bGt4);
+          diffuseColor.rgb *= 1.05 * bMot * bPl * bGr * bFn * bBd * (0.26 + 0.74 * bH);
 
           // Relief for the normal is that same height field, so the light agrees with the albedo:
           // plates shade as plates and the walls catch the edge. Sampled a second time 1.6 mm
           // around the trunk -- half a pixel -- because these furrows run vertically and their
           // gradient is horizontal, so a finite difference along the circumference is enough.
           vec3 bTan = normalize(vec3(-vObj.z, 0.0, vObj.x));
-          float bEps = 0.0016;
           float bVe = bFbm(bP + bTan * (33.0 * bEps), bW);
-          float bSl = (smoothstep(0.420 - bWd, 0.420 + bWd, bVe) - bHt) * bDep / bEps;
+          float bSl = (smoothstep(0.427 - bWd, 0.427 + bWd, bVe) - bHt) * bDep / bEps;
 
           // The cross-cracks get a slope of their own, and it is the only term on this trunk that
           // can produce a sky response at all. Every other bump here tilts the normal HORIZONTALLY,
@@ -616,8 +1056,9 @@ function dressBark(mat: THREE.MeshStandardMaterial | null, t: Trunk) {
           // themselves however far the normal was pushed. A crack runs across the trunk, so its
           // gradient is vertical, and tilting the normal up and down either side of it is what
           // finally lets the canopy light catch a lip and leave a shadow under it.
-          float bCkFe = bFbm2(bQ + vec3(0.0, 26.0 * bEps, 0.0));
-          float bCkS = (smoothstep(0.335 - bCkW, 0.335 + bCkW, bCkFe) - bCk) / bEps;`
+          // Both walls of a band tilt, and in opposite directions -- a V-groove, where the old
+          // sub-level set could only ever tilt one way and read as a step.
+          float bCkS = (smoothstep(bCkHW - bCkAA, bCkHW + bCkAA, abs(bCkFe - 0.40)) - bCk) / bEps;`,
       )
       .replace(
         "#include <aomap_fragment>",
@@ -641,7 +1082,7 @@ function dressBark(mat: THREE.MeshStandardMaterial | null, t: Trunk) {
           // scaling those too would flatten the one piece of real shading the trunk had.
           float bAO = 0.24 + 0.76 * pow(bNV, 0.62);
           reflectedLight.indirectDiffuse *= bAO;
-          reflectedLight.indirectSpecular *= bAO;`
+          reflectedLight.indirectSpecular *= bAO;`,
       )
       .replace(
         "#include <emissivemap_fragment>",
@@ -660,7 +1101,7 @@ function dressBark(mat: THREE.MeshStandardMaterial | null, t: Trunk) {
           // measured R/G fell from 1.37 on the body to 1.20 in the highlight, which is backwards for
           // sunlight through a warm canopy. Half the power, more saturated, a stop tighter.
           float bRim = pow(1.0 - bNV, 4.2) * smoothstep(0.0, 0.55, dot(normalize(vCylV), bSunV));
-          totalEmissiveRadiance += vec3(0.30, 0.20, 0.09) * bRim;`
+          totalEmissiveRadiance += vec3(0.30, 0.20, 0.09) * bRim;`,
       )
       .replace(
         "#include <normal_fragment_begin>",
@@ -668,9 +1109,16 @@ function dressBark(mat: THREE.MeshStandardMaterial | null, t: Trunk) {
           // cross(tangent, normal) is the up-the-trunk direction in view space, so the cracks can
           // be bumped without carrying another varying through the vertex shader.
           vec3 bUpV = normalize(cross(vTanV, normalize(normal)));
+          // The cross-crack gain is half the fissure's for a reason that is about the LIGHT RIG, not
+          // about the cracks. Both terms tilt the normal by up to a full unit vector at a wall --
+          // 45 degrees over the two and a half pixels the wall is wide -- but a fissure tilts it
+          // sideways, where the hemisphere light and the IBL barely respond, and a crack tilts it up
+          // and down, where they respond with everything they have. At equal gain the cracks came
+          // back as ruled horizontal lines with a bright lip under each one: a decal on a tube. Same
+          // relief, matched response.
           normal = normalize(normal
             - vTanV * clamp(bSl * 0.006 * bCo, -1.0, 1.0)
-            - bUpV * clamp(bCkS * 0.0028 * bCo, -1.0, 1.0));
+            - bUpV * clamp(bCkS * 0.0014 * bCo, -1.0, 1.0));
           // Grazing-angle darkening on the PERTURBED normal: bark is deep enough that at a
           // glancing view its own ridges shadow each other. That is a centimetre-scale effect and
           // it is all this term was ever entitled to do. It used to be carrying the trunk's whole
@@ -686,7 +1134,7 @@ function dressBark(mat: THREE.MeshStandardMaterial | null, t: Trunk) {
           // Hoisted here because three runs emissivemap_fragment before aomap_fragment and both
           // want it: the rim below and the ambient occlusion above are the same geometric fact
           // read at its two ends.
-          float bNV = abs(dot(normalize(vCylV), normalize(vViewPosition)));`
+          float bNV = abs(dot(normalize(vCylV), normalize(vViewPosition)));`,
       );
   };
   // three's program cache does not key on onBeforeCompile, so without this every trunk after the
@@ -808,7 +1256,8 @@ function trunkGeometry(t: Trunk) {
       // is zero over most of the trunk and swells in isolated patches, which is how a trunk gets
       // scars and burls instead of getting corrugated.
       const ov =
-        0.085 * Math.sin(a * 2 + y * 0.9 + t.seed) + 0.055 * Math.sin(a * 3 - y * 0.7 + t.seed * 2.0);
+        0.085 * Math.sin(a * 2 + y * 0.9 + t.seed) +
+        0.055 * Math.sin(a * 3 - y * 0.7 + t.seed * 2.0);
       const sw = swY * Math.max(0, Math.sin(a + y * 0.31 + t.seed * 2.7));
 
       let r =
@@ -976,7 +1425,7 @@ export default function Jungle() {
     (c) => {
       c.tex.dispose();
       c.map.dispose();
-    }
+    },
   );
   const trunks = useSliced(TRUNKS, trunkGeometry, (g) => g.dispose());
   const frond = useRef<FrondParts>({}).current;
@@ -1020,6 +1469,7 @@ export default function Jungle() {
         <mesh key={i} position={[0, c.l.y, c.l.z]}>
           <planeGeometry args={[c.l.w, c.l.h]} />
           <meshBasicMaterial
+            ref={(m: THREE.MeshBasicMaterial | null) => dressCanopy(m, c.l)}
             color={c.col}
             map={c.map}
             alphaMap={c.tex}
@@ -1031,7 +1481,13 @@ export default function Jungle() {
       ))}
 
       {trunks.map((g, i) => (
-        <mesh key={i} geometry={g} position={[TRUNKS[i].x, BASE_Y, TRUNKS[i].z]} castShadow receiveShadow>
+        <mesh
+          key={i}
+          geometry={g}
+          position={[TRUNKS[i].x, BASE_Y, TRUNKS[i].z]}
+          castShadow
+          receiveShadow
+        >
           {/* envMapIntensity stays near nothing for the same reason the stones' does: venice_sunset
               paints unlit bark violet, and violet is the one colour this valley does not own */}
           <meshStandardMaterial

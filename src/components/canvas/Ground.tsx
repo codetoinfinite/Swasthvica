@@ -76,9 +76,35 @@ function groundGeometry() {
  * resolution drops -- which is the point, since this is 16 MB of VRAM and most of a second of
  * canvas work at full size.
  */
-const T = quality().texSize; // at 2048 one tile = 9 world units, 227 texels per unit
+const T = quality().texSize; // at 2048 one tile = 6 world units, 341 texels per unit
 const K = T / 2048;
-const TILE = 9;
+
+/**
+ * How much world one repeat of the sheet covers, in metres. It is a sharpness control, not a
+ * styling one, and it is set from the screen and not by eye.
+ *
+ * The floor is the largest thing in frame and it is seen almost edge-on, which is the worst case
+ * for a texture: the camera sits 2.4m up and the bottom of a 35deg frame leaves it at -17.5deg, so
+ * the near edge of the ground is 2.4 / sin(17.5deg) = 7.98m away along the slant. At that distance
+ * a 1640-device-pixel-tall viewport spans 2 * 7.98 * tan(17.5deg) = 5.03m, which is 326 device
+ * pixels for every world metre ACROSS the view direction. Along it the same metre is foreshortened
+ * by sin(17.5deg) and covers 98, and the 3.3:1 between those two numbers is what the 16x anisotropy
+ * below is for.
+ *
+ * The across figure is the one that decides whether the floor is sharp. TILE 9 put 2048 / 9 = 227
+ * texels on a metre that the screen was drawing with 326 pixels: a magnification of 1.44, so the
+ * sampler sat below level 0 with nothing left to read and bilinear stretched every leaf. That is
+ * the smear. TILE 6 puts 341 texels on the same metre -- 1.05, which is 1:1 -- and it costs
+ * nothing: same canvas, same raster time, same 16MB, only a larger `repeat`.
+ *
+ * The reason it can be halved at all is that this sheet has no landmarks. It is humus gradients,
+ * 8200 litter almonds, 300 twigs and 700 pebbles, all stochastic; the largest feature is a 2.2m
+ * humus blob that becomes 1.5m, and the vertex-colour macro variation in `terrain()` breaks up what
+ * is left. Twelve repeats of noise is still noise. The drawn features shrink with it, which is a
+ * second small win rather than a cost -- litter at 4-14cm is closer to a real forest floor than the
+ * 6-21cm the same shapes covered at TILE 9.
+ */
+const TILE = 6;
 
 /**
  * Leaf litter, drawn as an almond rather than an ellipse — an ellipse at this size reads as a
@@ -96,8 +122,8 @@ function leafPath(P: Path2D, x: number, y: number, len: number, wid: number, rot
   P.quadraticCurveTo(x - px, y - py, x - dx, y - dy);
 }
 
-// The tile repeats eight times across the sheet, so anything that crosses an edge has to be drawn
-// again on the far side or the seam shows up as a grid of clean-swept lines every nine metres.
+// The tile repeats twelve times across the sheet, so anything that crosses an edge has to be drawn
+// again on the far side or the seam shows up as a grid of clean-swept lines every six metres.
 function wrapOff(v: number, r: number) {
   if (v - r < 0) return [0, T];
   if (v + r > T) return [0, -T];
@@ -105,9 +131,20 @@ function wrapOff(v: number, r: number) {
 }
 
 const LITTER = [
-  "#2e2717", "#382f1c", "#423721", "#4b3f24", "#544628", "#5e4d2b",
-  "#332d1a", "#3d3620", "#463d23", "#514529", "#6a5730", "#756034",
-  "#3f4c26", "#48582d",
+  "#2e2717",
+  "#382f1c",
+  "#423721",
+  "#4b3f24",
+  "#544628",
+  "#5e4d2b",
+  "#332d1a",
+  "#3d3620",
+  "#463d23",
+  "#514529",
+  "#6a5730",
+  "#756034",
+  "#3f4c26",
+  "#48582d",
 ];
 const PEBBLE = ["#57543f", "#635f49", "#4a483a", "#6e6a52"];
 
@@ -155,7 +192,7 @@ function floorTexture() {
   for (let i = 0; i < Math.round(8200 * K * K); i++) {
     const x = rnd() * T;
     const y = rnd() * T;
-    const len = (13 + Math.pow(rnd(), 1.6) * 34) * K; // 0.06 .. 0.21 world units
+    const len = (13 + Math.pow(rnd(), 1.6) * 34) * K; // 0.04 .. 0.14 world units
     const wid = len * (0.26 + 0.2 * rnd());
     const rot = rnd() * Math.PI * 2;
     // the last two entries are fresh green fall and should stay rare
@@ -187,7 +224,7 @@ function floorTexture() {
           x + ox + Math.cos(a) * l * 0.5 - Math.sin(a) * bend,
           y + oy + Math.sin(a) * l * 0.5 + Math.cos(a) * bend,
           x + ox + Math.cos(a) * l,
-          y + oy + Math.sin(a) * l
+          y + oy + Math.sin(a) * l,
         );
       }
   }
@@ -311,7 +348,7 @@ export default function Ground() {
       parts.tex?.dispose();
       parts.nrm?.dispose();
     },
-    [parts]
+    [parts],
   );
 
   // The floor is the one surface the bottle stands on, so a half-built version of it is worse

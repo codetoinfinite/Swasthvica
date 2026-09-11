@@ -10,6 +10,7 @@ import {
   bushTexture,
   dressLeaf,
   frondTexture,
+  frondTextureHi,
   grassTexture,
   litterTexture,
   reedTexture,
@@ -94,6 +95,8 @@ type Spec = {
   tilt: number;
   sink: number;
   tex: () => THREE.Texture;
+  /** Height in texels of that sheet. Only set where the near-plane sharpness floor applies. */
+  texPx?: number;
   rough: number;
   /** environment reflection, per species. Defaults to the understory's 0.07. */
   env?: number;
@@ -232,8 +235,12 @@ const SPECIES: Spec[] = [
     // and the bank is near y 1.0 -- so what enters the picture is the upper third of each frond,
     // leaning in from the side. `edge` keeps them out of the middle half so the headline and the
     // corridor the bottle rises through both stay clear, and `dim` keeps them where the near
-    // foreground of a closed-canopy shot belongs: nearly a silhouette. Two metres of card off a
-    // 256 px sheet is soft, and that is not a defect here -- a near foreground is out of focus.
+    // foreground of a closed-canopy shot belongs: nearly a silhouette. Soft is right for this band
+    // -- but soft and low-resolution are different things, and this used to take the shared 256 px
+    // frond sheet, which at 2.3 m and 2.2 m away is 5.1 device pixels per texel. That does not
+    // arrive as defocus, it arrives as a five-pixel staircase around a blurry fill, because
+    // alphaTest keeps the silhouette hard while the interior blurs. `frondTextureHi` is the same
+    // frond at 1024; see the note there.
     // n and scale are set against each other. The first pass ran 120 plants at up to three metres
     // and produced ONE frond fan three hundred pixels across on the left, which is a poster, not a
     // foreground -- a single card that large is read as a shape rather than as depth. Twice as many
@@ -257,7 +264,8 @@ const SPECIES: Spec[] = [
     tilt: 0.62,
     sink: 0.0,
     dim: 0.42,
-    tex: frondTexture,
+    tex: frondTextureHi,
+    texPx: 1024,
     rough: 0.9,
   },
   {
@@ -349,6 +357,30 @@ const SPECIES: Spec[] = [
 // the camera's own ground point at hero A; the scatter is polar about it so that "how far from
 // the viewer" is the variable the density law is written in
 const EYE_Z = 9;
+/** Camera height, from the hero camera in CanvasRoot. Only the near-plane sharpness floor uses it. */
+const EYE_Y = 2.4;
+/**
+ * Device pixels a cutout card may cover per texel of its sheet before it stops reading as depth
+ * and starts reading as resolution.
+ *
+ * The camera is 35 deg vertical fov on a 1640 device-pixel-tall buffer, so it resolves
+ * 1640 / (2 * tan(17.5 deg)) = 2602 device pixels per world metre at one metre, falling as 1/d. A
+ * card `s` metres tall at distance `d` therefore covers `s * 2602 / d` pixels off however many
+ * texels its sheet is tall, and the ratio of those two is the magnification.
+ *
+ * Below about 1.5 the sheet out-resolves the screen and the card is simply soft. Above it the
+ * alphaTest contour -- which is a hard threshold on a channel whose ramp is one texel wide, however
+ * cleanly the source path was drawn -- lands on the texel grid, and a staircase with one riser per
+ * texel is a staircase with several pixels per riser. Soft is depth; stepped is Minecraft. 1.5 is
+ * Set to 3 rather than to the ~1.5 where the staircase actually starts, because this rejection
+ * reshuffles the whole scatter -- every rejected sample shifts the RNG stream for all that follow --
+ * and at 1.5 it moved enough of the near band that a wall of mid-distance blades closed over the
+ * trunk that used to anchor the left of frame. 3 keeps the composition and still rejects the
+ * pathological cases: the card that prompted this stood at 5.2, nearly two metres of leaf one metre
+ * from the lens. Between 1.5 and 3 the contour is soft-edged rather than stepped, which is the
+ * artefact this is here to avoid.
+ */
+const MAX_TEXEL_MAG = 3;
 /**
  * How far a floating card sits above the water it is riding. The material displaces the card by the
  * river's own low-frequency height field (`heightLF`, see waterField.ts), so this is clearance over
@@ -369,9 +401,17 @@ const AFLOAT_CLEAR = 0.02;
 const SPAN = 1.0; // half-angle, radians — a touch wider than the 32.4 deg horizontal half-fov
 
 type Placed = {
-  x: number; y: number; z: number; s: number; rot: number; tx: number; tz: number;
+  x: number;
+  y: number;
+  z: number;
+  s: number;
+  rot: number;
+  tx: number;
+  tz: number;
   /** how much sun this plant caught (lightness), how far its hue drifts, how saturated it is */
-  k: number; jh: number; js: number;
+  k: number;
+  jh: number;
+  js: number;
 };
 
 /**
@@ -425,13 +465,7 @@ function place(sp: Spec, density = 1): Placed[] {
     // drift of it is the shot, not a defect. Excluding it cost the frame its centre: the corridor
     // is 180 px wide at the near bank and it fell exactly on the open water under the headline,
     // which is the one part of the near channel not screened by verge grass.
-    if (
-      !flat &&
-      z > -1.6 &&
-      z < 6.6 &&
-      Math.abs(x) < 0.12 + 0.55 * ((EYE_Z - z) / EYE_Z)
-    )
-      continue;
+    if (!flat && z > -1.6 && z < 6.6 && Math.abs(x) < 0.12 + 0.55 * ((EYE_Z - z) / EYE_Z)) continue;
     // 0.6341 is tan(fov/2) * aspect at this camera, i.e. the frame's half-width per unit of depth
     if (sp.edge !== undefined && Math.abs(x) < sp.edge * 0.6341 * (EYE_Z - z)) continue;
     let blocked = false;
@@ -445,6 +479,25 @@ function place(sp: Spec, density = 1): Placed[] {
 
     const bias = rnd();
     const s = sp.s0 + (sp.s1 - sp.s0) * bias * bias;
+    // Near-plane sharpness floor: how big a card may be is a function of how close it stands.
+    //
+    // `r0` already holds fresh samples out beyond the lens, but it is a radius on the ground about
+    // the camera's own point and the clump walk does not respect it -- a chain of `clump`-length
+    // hops can tunnel a plant well inside it, one neighbour at a time. That is how a 2 m verge card
+    // ended up 0.98 m from the eye, at 5.2 device pixels per texel, stepping visibly across the
+    // whole left of frame. No sheet size reaches that: matching it would take 5300 texels.
+    //
+    // So bound the pair instead of the position. `s * texPx / d <= MAX_TEXEL_MAG` rearranges to a
+    // minimum distance per scale, which the clump walk cannot route around because it is checked
+    // after the scale is drawn. The count is unchanged -- the guard loop resamples -- so this
+    // redistributes rather than thins: big cards move back, small ones may still come close, which
+    // is what a real near foreground does anyway. A 2.3 m frond one metre from your eye is not a
+    // thing a photograph contains.
+    if (!flat && sp.texPx !== undefined) {
+      const dy = EYE_Y - (groundHeight(x, z) + s * 0.5);
+      const eye = Math.sqrt(x * x + (EYE_Z - z) * (EYE_Z - z) + dy * dy);
+      if ((s * 2602) / eye > MAX_TEXEL_MAG * sp.texPx) continue;
+    }
     // A floating leaf sits ON the water, not on the bed, and the surface is y = 0. The card is
     // modelled standing up from its own origin, so a quarter turn about x lays it down; the jitter
     // either side of that is the leaf riding the ripple rather than lying on glass. Lifted a
@@ -558,7 +611,7 @@ function Species({ sp }: { sp: Spec }) {
       _c.setHSL(
         sp.hue + (o.jh - 0.5) * 0.16,
         (afloat ? 0.3 : 0.04) + 0.32 * o.js * o.js,
-        0.52 + 0.52 * o.k * o.k
+        0.52 + 0.52 * o.k * o.k,
       );
       // the SAME dapple field Ground.tsx tints its vertices with, so a plant standing in a patch
       // of floor the canopy shades is shaded with it. Plants lit evenly over a mottled floor is
@@ -615,8 +668,7 @@ function Species({ sp }: { sp: Spec }) {
   }, [ready, parts, sp]);
 
   useLayoutEffect(() => {
-    if (mat.current)
-      dressLeaf(mat.current, { wind: true, trans: sp.trans, afloat: sp.afloat });
+    if (mat.current) dressLeaf(mat.current, { wind: true, trans: sp.trans, afloat: sp.afloat });
   }, [sp]);
 
   // Floating litter casts no shadow. The shadow pass runs the plain depth material, which knows

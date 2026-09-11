@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { ANISOTROPY } from "./texUtil";
 
 const CREAM = "#f2ead8";
 const BRASS = "#c9a24a";
@@ -8,7 +9,7 @@ function letterspaced(
   text: string,
   cx: number,
   y: number,
-  tracking: number
+  tracking: number,
 ) {
   const widths = [...text].map((ch) => ctx.measureText(ch).width);
   const total = widths.reduce((a, b) => a + b, 0) + tracking * (text.length - 1);
@@ -141,6 +142,6 @@ export async function bakeLabelTexture(
 
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 8;
+  tex.anisotropy = ANISOTROPY;
   return tex;
 }

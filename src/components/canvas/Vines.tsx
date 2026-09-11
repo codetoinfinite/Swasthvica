@@ -407,20 +407,19 @@ function dressVine(mat: THREE.MeshStandardMaterial | null, arc: number) {
   mat.userData.vine = true;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uNodes = { value: Math.max(4, arc / 0.15) };
+    shader.uniforms.uVineSky = { value: new THREE.Color("#cfc09a") };
     shader.vertexShader = shader.vertexShader
-      .replace(
-        "#include <common>",
-        "#include <common>\nvarying vec2 vVine;\nvarying vec3 vVineN;"
-      )
+      .replace("#include <common>", "#include <common>\nvarying vec2 vVine;\nvarying vec3 vVineN;")
       .replace(
         "#include <begin_vertex>",
-        "#include <begin_vertex>\n\tvVine = uv;\n\tvVineN = normalize(normal);"
+        "#include <begin_vertex>\n\tvVine = uv;\n\tvVineN = normalize(normal);",
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
         "#include <common>",
         `#include <common>
         uniform float uNodes;
+        uniform vec3 uVineSky;
         varying vec2 vVine;
         varying vec3 vVineN;
         float vh(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }
@@ -429,7 +428,7 @@ function dressVine(mat: THREE.MeshStandardMaterial | null, arc: number) {
           vec2 u = f * f * (3.0 - 2.0 * f);
           return mix(mix(vh(i), vh(i + vec2(1.0, 0.0)), u.x),
                      mix(vh(i + vec2(0.0, 1.0)), vh(i + vec2(1.0, 1.0)), u.x), u.y);
-        }`
+        }`,
       )
       .replace(
         "#include <map_fragment>",
@@ -451,14 +450,41 @@ function dressVine(mat: THREE.MeshStandardMaterial | null, arc: number) {
         // and one material over three hundred pixels is what made this look moulded.
         float vLi = smoothstep(0.52, 0.96, vnz(vec2(vAlong * 9.0, vRound * 0.6)))
                   * smoothstep(0.0, 0.65, vVineN.y);
-        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.072, 0.101, 0.049), vLi * 0.8);`
+        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.072, 0.101, 0.049), vLi * 0.8);`,
       )
       .replace(
         "#include <roughnessmap_fragment>",
         `#include <roughnessmap_fragment>
         // Lichen is dry crust on wet-looking wood; leaving them the same gloss cancels half of what
         // the colour split just bought.
-        roughnessFactor = clamp(roughnessFactor - 0.10 + 0.14 * vLi + 0.06 * (vFib - 0.5), 0.0, 1.0);`
+        roughnessFactor = clamp(roughnessFactor - 0.10 + 0.14 * vLi + 0.06 * (vFib - 0.5), 0.0, 1.0);`,
+      )
+      .replace(
+        "#include <tonemapping_fragment>",
+        `// SKYLIGHT ON THE LIMBS, which is the one thing a backlit stem cannot do without and the
+        // one thing this material had no way to produce. Scanned across the near strand the stem
+        // ran luma 51 -> 29 -> 40 over its full 25 device px against a sky of 157: a 22-level
+        // range on a cylinder, which is not a cylinder, it is a dark ribbon. It is not faceting --
+        // TubeGeometry's Frenet normals interpolate, and the profile above has no plateaus in it --
+        // it is that every specular path to the sky is shut. F0 for wood is 0.04 and
+        // envMapIntensity is 0.1, so the environment term lands below half a level exactly as it
+        // did on the stones, and roughness 0.95 spreads what is left so wide it cannot be told
+        // from the diffuse.
+        //
+        // Fresnel does not care about either. Reflectance climbs to 1.0 at grazing incidence
+        // whatever F0 and whatever the roughness, so both limbs of a stem with bright sky behind
+        // it ARE bright -- this is the term a real IBL would have handed over for free. Exponent
+        // 1.5, not the usual 3: on a cylinder n.V is sqrt(1 - (d/R)^2) across the silhouette, so
+        // an exponent of 3 puts the whole rim inside the outer 1.5 px of a 12.5 px radius and
+        // draws an outline stroke rather than a curved surface. 1.5 spreads it over about 5 px a
+        // side -- 0.42 of full at 1 px in, 0.25 at 2.5 px, 0.09 at 5 px -- and stays exactly 0 on
+        // the centre line. The tint is the sky the vines actually hang against, STOPS[0.18].
+        //
+        // Lichen is a dry crust and crust does not glint, so it takes half the sheen back out. It
+        // is the same vLi that already splits the colour and the roughness, so the three agree.
+        float vNdV = clamp(dot(normalize(vViewPosition), normal), 0.0, 1.0);
+        gl_FragColor.rgb += uVineSky * (pow(1.0 - vNdV, 1.5) * 0.28 * (1.0 - 0.5 * vLi));
+        #include <tonemapping_fragment>`,
       );
   };
   mat.customProgramCacheKey = () => "vine";
@@ -477,16 +503,16 @@ function Strand({ v, index, tex }: { v: Vine; index: number; tex: THREE.Texture 
         v.pts.map((p) => new THREE.Vector3(p[0], p[1], p[2]).sub(anchor)),
         false,
         "catmullrom",
-        0.5
+        0.5,
       ),
-    [v, anchor]
+    [v, anchor],
   );
   // Vines thin on a gentler curve than the floor does. They hang dead centre of frame with sky
   // behind them and they are the surface the drop of Act 4 collects off, so a strand that goes
   // bare reads as a wire, not as a cheaper vine. Half the tier's cut, floored at six leaves.
   const nLeaves = useMemo(
     () => Math.max(6, Math.round(v.leaves * (0.5 + 0.5 * quality().density))),
-    [v.leaves]
+    [v.leaves],
   );
   const geo = useMemo(() => vineGeometry(curve, v.r), [curve, v.r]);
   const arc = useMemo(() => curve.getLength(), [curve]);
@@ -503,8 +529,7 @@ function Strand({ v, index, tex }: { v: Vine; index: number; tex: THREE.Texture 
     const nodes = Math.ceil(nLeaves / PER);
     for (let i = 0; i < nLeaves; i++) {
       const node = Math.floor(i / PER);
-      const t =
-        v.from + (v.to - v.from) * ((node + 0.14 * (rnd() - 0.5)) / Math.max(1, nodes - 1));
+      const t = v.from + (v.to - v.from) * ((node + 0.14 * (rnd() - 0.5)) / Math.max(1, nodes - 1));
       curve.getPointAt(THREE.MathUtils.clamp(t, 0, 1), _c);
       // A shoot is youngest at its tip, so the leaves there are the smallest, and a strand whose
       // leaves are all one size reads as a manufactured brush however well they are spaced. The
@@ -546,7 +571,7 @@ function Strand({ v, index, tex }: { v: Vine; index: number; tex: THREE.Texture 
         _u.normalize();
         _x.crossVectors(_n, _u);
         _q.premultiply(
-          _q2.setFromAxisAngle(_g, Math.atan2(_x.dot(_g), _n.dot(_u)) + (rnd() - 0.5) * 1.1)
+          _q2.setFromAxisAngle(_g, Math.atan2(_x.dot(_g), _n.dot(_u)) + (rnd() - 0.5) * 1.1),
         );
       }
       _s.set(s, s, s);
@@ -591,6 +616,23 @@ function Strand({ v, index, tex }: { v: Vine; index: number; tex: THREE.Texture 
             ever sees a leaf against a bright background, and these are the leaves the drop of Act 4
             collects off. They get the strongest transmission in the scene for that reason.
 
+            CALIBRATED, not chosen. trans multiplies uTransAmt in dressLeaf's transmission block,
+            and 0.9 -- the value every other leaf here runs -- was measurably too little for THIS
+            placement: over the top strip of frame, where the vines hang against open sky, the leaf
+            pixels sat at luma 24-38 with the sky behind them at 191. That is not a dark leaf, that
+            is black paper, and it was the actual complaint about this corner of the scene. (The
+            edges were never the problem -- a row scan across a silhouette steps 191 / 73 / 33 in a
+            single device pixel, which is MSAA doing its job. It only looked like a staircase in a
+            2x nearest-neighbour crop, which is what 2x nearest-neighbour does to every 1 px edge.)
+
+            Three values, same capture rig, mean luma of the sub-120 leaf pixels: 0.9 -> 54.0,
+            2.2 -> 59.7, 3.0 -> 62.4. 3.0 measures best and is not physically illegal (nothing gets
+            within 128 levels of the 191 sky, so no leaf is emitting more than falls on it), but it
+            pushes the sunward leaflets yellow-green enough to read as backlighting effect rather
+            than as backlighting. 2.2 takes 68% of the gain and keeps the hue. Note trans is inside
+            dressLeaf's customProgramCacheKey, so this number forks the vine program off every
+            other leaf program in the scene rather than mutating a shared one.
+
             On the roughness: 0.72 is the right gloss for ONE bel leaf -- the species has a hard
             waxy cuticle and a real leaf does throw a sharp highlight. It is the wrong gloss for
             this quad, which is a whole eight-leaflet shoot drawn flat. The leaflets' own spread of
@@ -602,7 +644,7 @@ function Strand({ v, index, tex }: { v: Vine; index: number; tex: THREE.Texture 
             card-is-not-a-leaf argument is in dressLeaf. */}
         <meshStandardMaterial
           ref={(m: THREE.MeshStandardMaterial | null) => {
-            if (m) dressLeaf(m, { wind: true, trans: 0.9 });
+            if (m) dressLeaf(m, { wind: true, trans: 2.2, atlas: true });
           }}
           map={tex}
           alphaTest={0.45}

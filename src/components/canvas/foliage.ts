@@ -16,6 +16,24 @@ export function rng(seed: number) {
 
 type Blade = { a: number; len: number; wid: number; curl: number; taper: number };
 
+/** One bel shoot in the vine-spray atlas -- see `sprayTexture`. Lengths are in cell texels. */
+type Shoot = {
+  seed: number;
+  /** Leaflets on the runner. Odd counts break the left/right alternation into something organic. */
+  n: number;
+  /** How far the runner bows sideways at mid-height. Signed. */
+  bow: number;
+  /** Where the runner leaves the top of its cell, offset from the cell's centre line. */
+  drift: number;
+  /** Leaflet radius at the base of the shoot. Leaflets shrink toward the growing tip. */
+  r: number;
+  /** Constant rotation added to every leaflet, so some shoots hang limper than others. */
+  hang: number;
+  /** Direction the light comes from in this cell, as a canvas-space vector. */
+  lx: number;
+  ly: number;
+};
+
 /**
  * Scale a hex colour, optionally warming it as it goes.
  *
@@ -27,9 +45,28 @@ type Blade = { a: number; len: number; wid: number; curl: number; taper: number 
  * living thicket carries and that no all-green card can imply.
  */
 function shade(hex: string, m: number, warm = 0) {
-  const n = parseInt(hex.slice(1), 16);
+  // It takes rgb() as well as #rrggbb because it is routinely fed its OWN output: every caller
+  // that ramps a gradient does shade(col, 0.4) -> col -> shade(col, 1.15) with a col that already
+  // came from here. Parsing only hex made parseInt("gb(111,145,66)", 16) return NaN, every channel
+  // clamp to 0, and both ends of every one of those gradients come out BLACK -- so `blade`'s fronds
+  // and `heart`'s creeper leaves have been shading from black to colour to black, which is most of
+  // why the foliage read as flat dark plastic rather than as leaves with an interior.
+  let r: number;
+  let g: number;
+  let b: number;
+  if (hex.charCodeAt(0) === 35) {
+    const n = parseInt(hex.slice(1), 16);
+    r = (n >> 16) & 255;
+    g = (n >> 8) & 255;
+    b = n & 255;
+  } else {
+    const q = hex.slice(4, -1).split(",");
+    r = +q[0];
+    g = +q[1];
+    b = +q[2];
+  }
   const cl = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
-  return `rgb(${cl(((n >> 16) & 255) * (m + warm * 0.9))},${cl(((n >> 8) & 255) * (m + warm * 0.35))},${cl((n & 255) * (m - warm * 0.45))})`;
+  return `rgb(${cl(r * (m + warm * 0.9))},${cl(g * (m + warm * 0.35))},${cl(b * (m - warm * 0.45))})`;
 }
 
 /**
@@ -37,7 +74,13 @@ function shade(hex: string, m: number, warm = 0) {
  * falls. Leaves drawn as ellipses read as petals; the swell curve plus a droop that grows with
  * the blade's angle is what makes them hang like foliage.
  */
-function blade(ctx: CanvasRenderingContext2D, bx: number, by: number, b: Blade, mode: "mask" | "color") {
+function blade(
+  ctx: CanvasRenderingContext2D,
+  bx: number,
+  by: number,
+  b: Blade,
+  mode: "mask" | "color",
+) {
   const dx = Math.sin(b.a);
   const dy = -Math.cos(b.a);
   const tx = bx + dx * b.len;
@@ -48,6 +91,12 @@ function blade(ctx: CanvasRenderingContext2D, bx: number, by: number, b: Blade, 
   const N = 26;
   const L: [number, number][] = [];
   const R: [number, number][] = [];
+  // Spine, unit tangent and half-width per station, kept rather than discarded: the venation and
+  // the cross-blade roll below are all functions of the local frame, and recomputing the quadratic
+  // twice to get them back would double the only arithmetic in here that costs anything.
+  const P: [number, number][] = [];
+  const T: [number, number][] = [];
+  const W: number[] = [];
   for (let i = 0; i <= N; i++) {
     const s = i / N;
     const u = 1 - s;
@@ -61,25 +110,113 @@ function blade(ctx: CanvasRenderingContext2D, bx: number, by: number, b: Blade, 
     const w = b.wid * Math.pow(Math.sin(Math.PI * Math.min(1, s * 1.04)), b.taper) * (1 - 0.3 * s);
     L.push([px - gy * w, py + gx * w]);
     R.push([px + gy * w, py - gx * w]);
+    P.push([px, py]);
+    T.push([gx, gy]);
+    W.push(w);
   }
 
-  ctx.beginPath();
-  ctx.moveTo(L[0][0], L[0][1]);
-  for (let i = 1; i <= N; i++) ctx.lineTo(L[i][0], L[i][1]);
-  for (let i = N; i >= 0; i--) ctx.lineTo(R[i][0], R[i][1]);
-  ctx.closePath();
+  const outline = () => {
+    ctx.beginPath();
+    ctx.moveTo(L[0][0], L[0][1]);
+    for (let i = 1; i <= N; i++) ctx.lineTo(L[i][0], L[i][1]);
+    for (let i = N; i >= 0; i--) ctx.lineTo(R[i][0], R[i][1]);
+    ctx.closePath();
+  };
+  outline();
 
   if (mode === "mask") {
     ctx.fillStyle = "#fff";
     ctx.fill();
     return;
   }
+  /* Nine blades off one table are nine identical blades, and a fan of clones is one of the things
+     that makes a plant read as a plant-shaped object rather than as a plant. `b.a` is unique per
+     entry and constant per sheet, so hashing it gives each blade a fixed tonal offset with no seed
+     to thread through and no RNG state to share with the scatter. +/-9% on the lit end only: the
+     shaded base of a leaf is where the light is not, and lights vary far more than pigments do. */
+  const hv = Math.sin(b.a * 12.9898) * 43758.5453;
+  const jit = 1 + 0.18 * (hv - Math.floor(hv) - 0.5);
+
   const g = ctx.createLinearGradient(bx, by, tx, ty);
   g.addColorStop(0, "#2c3d1a96");
-  g.addColorStop(0.35, "#4a6529");
-  g.addColorStop(1, "#7a9a41");
+  g.addColorStop(0.35, shade("#4a6529", jit));
+  g.addColorStop(1, shade("#7a9a41", jit));
   ctx.fillStyle = g;
   ctx.fill();
+
+  /* Everything from here to the midrib is across-blade shape, and before it existed there was none
+     of it at all: the fill gradient runs base to TIP, so every cross-section of the leaf was one
+     flat colour. That is fine at the twenty pixels of blade width this sheet was drawn for. The
+     near band is now eighty-five device pixels across a single blade -- a 1024 sheet at three
+     metres -- and eighty-five pixels of unbroken flat green is the whole "plastic cutout" read.
+     A real strap leaf at that width shows three things, and all three are cheap here because they
+     are rasterised once into the atlas and cost nothing per frame. */
+  ctx.save();
+  ctx.clip();
+  // `clip` leaves the path in place, but the venation below calls `beginPath`, so the margin
+  // stroke at the end has to lay the outline down again.
+
+  /* 1. The roll. A leaf is a shallow vault, not a plane: it turns away from the light at both
+     margins and faces it along the rib. The card cannot get this from `dressLeaf`'s dome term,
+     which works in card UV and so cannot know where any one blade of a nine-blade fan lies. The
+     gradient axis is the chord normal through mid-spine, which drifts from the true normal as the
+     blade curls but never by enough to matter at curl <= 0.5. Black at 0.24 over the shaded base
+     lands the margin at 0.78 of the rib -- a shape ratio, not a stripe. */
+  const mi = N >> 1;
+  const [mx, my] = P[mi];
+  const [mgx, mgy] = T[mi];
+  const rw = b.wid * 1.25;
+  const roll = ctx.createLinearGradient(mx + mgy * rw, my - mgx * rw, mx - mgy * rw, my + mgx * rw);
+  roll.addColorStop(0, "rgba(0,0,0,0.24)");
+  roll.addColorStop(0.42, "rgba(0,0,0,0)");
+  roll.addColorStop(0.58, "rgba(0,0,0,0)");
+  roll.addColorStop(1, "rgba(0,0,0,0.24)");
+  ctx.fillStyle = roll;
+  ctx.fill();
+
+  /* 2. Secondary venation, raked toward the tip the way pinnate veins leave a midrib. Twelve a
+     side at this station spacing, which is about one vein per half-width -- the proportion a strap
+     leaf actually has. Held to shade(1.32) at alpha 0.26, so the composited ratio against the fill
+     is about 1.08:1. That number is doing the same job as the midrib comment below: veins that
+     read as veins in sun and as straw in shade are an albedo mistake, not a lighting one. */
+  const vg = ctx.createLinearGradient(bx, by, tx, ty);
+  vg.addColorStop(0, shade("#2c3d1a", 1.32));
+  vg.addColorStop(0.35, shade("#4a6529", 1.32));
+  vg.addColorStop(1, shade("#7a9a41", 1.28));
+  ctx.strokeStyle = vg;
+  ctx.globalAlpha = 0.26;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 2; i <= N - 2; i += 2) {
+    const [vx, vy] = P[i];
+    const [ux, uy] = T[i];
+    const w = W[i];
+    for (const sgn of [-1, 1]) {
+      const nx = -uy * sgn;
+      const ny = ux * sgn;
+      ctx.moveTo(vx, vy);
+      ctx.quadraticCurveTo(
+        vx + nx * w * 0.5 + ux * w * 0.12,
+        vy + ny * w * 0.5 + uy * w * 0.12,
+        vx + nx * w * 0.86 + ux * w * 0.55,
+        vy + ny * w * 0.86 + uy * w * 0.55,
+      );
+    }
+  }
+  ctx.stroke();
+
+  /* 3. The margin. The last sliver of a leaf before the silhouette is the part turned furthest
+     from the light, and drawing it is what stops the cutout edge reading as a cut rather than as
+     an edge. Inside the clip, so half the stroke width falls outside the path and is discarded --
+     which is the point: it darkens inward only and leaves the alpha contour exactly where the mask
+     put it. */
+  ctx.strokeStyle = shade("#4a6529", 0.66);
+  ctx.globalAlpha = 0.5;
+  ctx.lineWidth = 2.4;
+  outline();
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+  ctx.restore();
   /* Midrib: without it a blade at 40px across is a flat green wedge. But it was a fixed pale
      rgba(154,182,102,0.6), which over the shaded base composites to (110,134,72) against (44,61,26)
      -- a 2.4:1 ALBEDO ratio. Albedo ratios survive lighting: put that blade in shade and the leaf
@@ -113,7 +250,7 @@ const FROND: Blade[] = [
 ];
 
 /**
- * A vine carries broad ovate leaves, not a fan of blades.
+ * A vine carries broad ovate leaves, not a fan of blades. Four shoots of them, in an atlas.
  *
  * It used to be SPRAY: seven `blade()` spindles radiating from one point. A blade's half-width is
  * sin(pi*s)^taper, which goes to zero at BOTH ends, so every one of the seven came to a point --
@@ -122,101 +259,82 @@ const FROND: Blade[] = [
  * frame.
  *
  * Bel is Aegle marmelos. Its margins are entire -- no teeth at all -- and its leaflets are ovate
- * to cordate off a runner, which is exactly what `heart()` already draws for the undergrowth
- * sprig. So the spray becomes a short bel shoot instead: a runner up the sheet with leaflets hung
- * alternately off it.
+ * with a drawn-out drip tip off a runner, which is what `leaflet()` below draws.
  *
- * Eleven rather than the old seven, and fatter, because these are the only leaves in the scene
- * with sky behind them. Measured, a gap between strands came back at (144,136,110) against a leaf
- * at (30,50,31) -- the sky's own colour at 5.4:1, so every hole between leaflets read as a bright
- * slash cut through the vine. Holes are closed by covering them.
+ * Then the second problem, which is the one that put "minecraft" in front of these. Vines.tsx
+ * builds ONE of these sheets and shares it across all fifteen strands, and those strands carry 913
+ * leaf cards between them. Every card was the same eight-leaflet arc, varied only by scale,
+ * orientation and an instance tint -- and the eye reads a repeated silhouette long before it reads
+ * a repeated colour. Four visibly different shoots, one per quadrant, times a per-instance mirror
+ * in dressLeaf's vertex stage, is eight silhouettes off one sheet and still one draw call.
  *
- * Lateral reach stays held to 58 from centre so no leaflet clips the sheet: heart() at radius r
- * reaches about 1.1r past its own centre and hangs at 0.72r off the runner, so r is capped near 28.
+ * 256 is an ATLAS, not a resolution bump, and the difference matters because the bump was already
+ * tried and rejected. Each shoot still occupies 128 texels, exactly what it had before. From the
+ * old note, kept because it still binds: "these cards are MINIFIED, not magnified -- the sampler
+ * was already reading below level 0, so twice the texels only moved it one level deeper, for 211 ms
+ * more raster at mount." So per-shoot density is untouched here; the extra texels buy VARIETY. The
+ * price is one 4x dilate pass, ~24 ms, and 234 KB.
  *
- * 128 is not a resolution shortcut, and it was tested as one. The hanging sprays read as chunky in
- * the hero frame, which looks like a magnified texture, so every sheet in this file was doubled and
- * the two hero stills re-shot at devicePixelRatio 2: PSNR 43.6 dB against the originals, with the
- * whole of the difference sitting on leaf edges and nothing on their interiors. These cards are
- * MINIFIED, not magnified -- the sampler was already reading below level 0, so twice the texels
- * only moved it one level deeper, for 211 ms more raster at mount. The chunkiness is alphaTest 0.45
- * biting into a mip-averaged alpha, which is a question about the leaflet shapes and the cutoff,
- * not about the sheet size. Don't spend the mount time again.
+ * Cells are drawn inset -- local x in [5,123], y in [6,128] -- because `dilate` bleeds colour four
+ * texels outward from every solid edge and an atlas is the one place in this file where that bleed
+ * has a neighbour to land in. Bottom is flush rather than inset: the card's pivot is at uv.y 0, so
+ * a transparent margin under the petiole is a visible gap between the leaf and the stem it hangs
+ * from. Cross-cell bleed at deep mips is not reachable either way -- a card measures ~95 device px
+ * against a 128-texel cell, so LOD is about 0.4 and never leaves level 0-1.
+ */
+const SHOOTS: Shoot[] = [
+  { seed: 5171, n: 13, bow: 11, drift: -6, r: 31, hang: 0.1, lx: 0.78, ly: -0.63 },
+  { seed: 2293, n: 11, bow: -7, drift: 9, r: 35, hang: -0.14, lx: -0.62, ly: -0.78 },
+  { seed: 8807, n: 14, bow: 16, drift: 3, r: 28, hang: 0.26, lx: 0.3, ly: -0.95 },
+  { seed: 4451, n: 12, bow: -13, drift: -2, r: 33, hang: 0.02, lx: -0.86, ly: -0.51 },
+];
+
+/**
+ * The vine spray, at 512 rather than the 256 every other cutout sheet uses.
+ *
+ * These cards hang closest to the camera of anything in the scene, and measured off a capture they
+ * magnify about 4.5x -- one atlas texel covers four and a half device pixels. That is what was
+ * making the leaves look chopped. A canvas fill antialiases its edge into a single texel, so the
+ * alpha ramp is one texel wide however cleanly the path was drawn; bilinear reconstruction of a
+ * one-texel ramp puts the alphaTest contour on a staircase whose steps are a texel each, and at
+ * 4.5x that is a four-pixel riser cutting across an organic outline. The coverage form in
+ * `dressLeaf` sharpens each riser to a pixel but cannot move it -- the staircase is in the shape of
+ * the contour, not in its softness -- so no amount of shader work reaches this. Only texels do.
+ *
+ * 512 halves the magnification to 2.25x. The geometry stays in 256-space and the context is scaled,
+ * because every constant in `shoot`, `fit` and `leaflet` -- the 128 cell pitch, the leaflet radii,
+ * the vein line widths -- is a 256-space number, and doubling them by hand in five places is how a
+ * sheet acquires a bug that only shows at one zoom level. Scaling the context scales stroke widths
+ * and gradient stops with the paths, which is what is wanted.
+ *
+ * The other sheets stay at 256: grass, reed, bush, frond and litter are all ground cover at two to
+ * six metres and none of them magnify past about 1.2x.
  */
 export const sprayTexture = () =>
   cutoutTexture(
-    128,
+    512,
     (ctx, mode) => {
-      const rnd = rng(5171);
+      ctx.scale(2, 2);
       ctx.lineCap = "round";
-      // The petiole, so a spray reads as attached to the vine rather than stuck on it. It has to
-      // run all the way to the bottom edge of the sheet -- the card's pivot sits on the curve at
-      // uv.y 0, and any transparent margin below the ink is a visible gap between leaf and stem.
-      if (mode === "mask") ctx.fillStyle = "#fff";
-      else ctx.fillStyle = "#4d3a22";
-      ctx.fillRect(60, 106, 8, 22);
-
-      // The runner: one shallow bow, so the shoot hangs rather than standing to attention.
-      const R = (t: number) => {
-        const u = 1 - t;
-        return [
-          u * u * 64 + 2 * u * t * 74 + t * t * 58,
-          u * u * 116 + 2 * u * t * 68 + t * t * 14,
-        ] as [number, number];
-      };
-      ctx.strokeStyle = mode === "mask" ? "#fff" : "#4c6130";
-      ctx.lineWidth = 5;
-      ctx.beginPath();
-      ctx.moveTo(64, 118);
-      ctx.quadraticCurveTo(74, 68, 58, 14);
-      ctx.stroke();
-
-      // Eight, not eleven. Eleven put a leaflet on screen about nine pixels across, and a chain of
-      // nine-pixel blobs is a mimosa or a fern -- pinnate, tiny, many -- when bel is the opposite:
-      // few leaflets, each broad. Eight at this radius also covers MORE of the sheet than eleven
-      // did (8 x 26^2 against 11 x 20^2), so the sky gaps close on the same change that fixes the
-      // plant. Radius stays under 32 so 1.82r of reach still clears the 58 lateral budget.
-      for (let i = 0; i < 8; i++) {
-        const t = 0.06 + 0.9 * (i / 7);
-        const [sx, sy] = R(t);
-        const side = i % 2 ? 1 : -1;
-        const r = 19 + 8 * (1 - t) + 5 * rnd();
-        const k = rnd();
-        const lx = sx + side * r * 0.72;
-        const ly = sy + r * 0.26;
-        ctx.strokeStyle = mode === "mask" ? "#fff" : "#5d7538";
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.moveTo(sx, sy);
-        ctx.lineTo(lx, ly);
-        ctx.stroke();
-        const d = rnd();
-        heart(
-          ctx,
-          lx,
-          ly,
-          r,
-          -side * 0.66,
-          mode,
-          d < 0.06 ? shade("#a09055", 0.7 + 0.4 * k, 0.26) : shade("#6f8f42", 0.5 + 0.9 * k)
-        );
-      }
+      ctx.lineJoin = "round";
+      SHOOTS.forEach((s, i) => shoot(ctx, mode, (i % 2) * 128, (i >> 1) * 128, s));
     },
-    "#3f5726"
+    "#3f5726",
   );
 
-const makeFrond = () =>
+const makeFrond = (size: number) =>
   cutoutTexture(
-    256,
+    size,
     (ctx, mode) => {
+      ctx.scale(size / 256, size / 256);
       ctx.lineCap = "round";
       FROND.forEach((b) => blade(ctx, 128, 250, b, mode));
     },
-    "#3a5222"
+    "#3a5222",
   );
 
 /**
- * One frond sheet for the three callers that ask for it.
+ * One frond sheet per size for the callers that ask for it.
  *
  * Undergrowth uses fronds in two bands and Jungle uses them for the floor cover, and each built its
  * own copy of a sheet that is deterministic down to the last texel -- same seed, same paths, same
@@ -225,25 +343,54 @@ const makeFrond = () =>
  *
  * Shared, and refcounted rather than kept forever, so leaving the scene still frees the texture:
  * `dispose` is wrapped per instance to decrement, and only the last holder's call reaches three.
+ * Keyed by size, because the near band needs a bigger sheet than the rest -- see `frondTextureHi`.
  */
-let frondShare: { tex: THREE.Texture; n: number } | null = null;
+const frondShare = new Map<number, { tex: THREE.Texture; n: number }>();
 
-export const frondTexture = () => {
-  if (!frondShare) {
-    const tex = makeFrond();
+const frondAt = (size: number) => {
+  let entry = frondShare.get(size);
+  if (!entry) {
+    const tex = makeFrond(size);
     const free = tex.dispose.bind(tex);
-    const entry = { tex, n: 0 };
+    const made = { tex, n: 0 };
     tex.dispose = () => {
-      if (--entry.n <= 0) {
-        if (frondShare === entry) frondShare = null;
+      if (--made.n <= 0) {
+        if (frondShare.get(size) === made) frondShare.delete(size);
         free();
       }
     };
-    frondShare = entry;
+    frondShare.set(size, made);
+    entry = made;
   }
-  frondShare.n++;
-  return frondShare.tex;
+  entry.n++;
+  return entry.tex;
 };
+
+export const frondTexture = () => frondAt(256);
+
+/**
+ * The same frond at 1024, for the near-plane band only.
+ *
+ * `verge` in Undergrowth stands 2.2 m from the camera and scales its cards to 2.3 m, so at 563
+ * device pixels per metre a single card covers about 1300 pixels of screen. Off a 256 px sheet that
+ * is 5.1 device pixels per texel, and the note that used to sit on `verge` argued the resulting
+ * softness was correct because a near foreground is out of focus.
+ *
+ * The softness is correct. The staircase is not, and they are not the same artefact. Defocus is
+ * smooth everywhere; an alphaTest cutout is the opposite -- it takes the one channel that decides
+ * the silhouette and hard-thresholds it, so the interior goes soft exactly as intended while the
+ * OUTLINE stays perfectly sharp and lands on the texel grid. A canvas fill antialiases its edge
+ * into a single texel, bilinear reconstruction of a one-texel ramp puts the 0.42 contour on a
+ * staircase with one step per texel, and at 5.1x each step is a five-pixel riser. The result is a
+ * crisp blocky outline around a blurry fill, which is the worst of both and reads as low
+ * resolution rather than as depth.
+ *
+ * 1024 brings it to 1.3 device pixels per texel, at which the contour is finer than the pixel grid
+ * and the card is simply soft. Costs one 1024 sheet, ~5.6 MB with its mip chain, and it is built on
+ * the sliced queue like the other eight. Only `verge` takes it: `fern` tops out at 1.45 m and
+ * Jungle's floor cover is smaller still, and both sit under 1.5 device pixels per texel at 256.
+ */
+export const frondTextureHi = () => frondAt(1024);
 
 /** One clock for every wind-driven material in the scene, so nothing beats against anything. */
 export const WIND = { uTime: { value: 0 }, uSway: { value: 0.055 } };
@@ -312,9 +459,12 @@ export function updateSun(camera: THREE.Camera) {
  */
 export function dressLeaf(
   mat: THREE.Material,
-  opts: { wind?: boolean; trans?: number; afloat?: boolean } = {}
+  opts: { wind?: boolean; trans?: number; afloat?: boolean; atlas?: boolean } = {},
 ) {
   const afloat = opts.afloat === true;
+  // The vine sheet is a 2x2 atlas of four shoots -- see sprayTexture. Off for every other caller,
+  // whose sheet holds one card.
+  const atlas = opts.atlas === true;
   // A leaf lying on a river does not sway on a stem; it rides the surface. The two displacements
   // are also written in terms of the same uniform name, `uTime`, off two different clocks -- wind
   // pauses under reduced motion and the water does not -- so letting both run would bind one of
@@ -326,6 +476,7 @@ export function dressLeaf(
     shader.fragmentShader = shader.fragmentShader.replace(
       "#include <common>",
       `#include <common>
+      varying vec2 vLeafUv;
       float lHash(vec2 p) {
         vec3 q = fract(vec3(p.xyx) * 0.1031);
         q += dot(q, q.yzx + 33.33);
@@ -336,7 +487,7 @@ export function dressLeaf(
         f = f * f * (3.0 - 2.0 * f);
         return mix(mix(lHash(i), lHash(i + vec2(1, 0)), f.x),
                    mix(lHash(i + vec2(0, 1)), lHash(i + vec2(1, 1)), f.x), f.y);
-      }`
+      }`,
     );
     if (afloat) {
       // The card is laid flat and then displaced by the river's OWN height field, so the four
@@ -358,7 +509,7 @@ export function dressLeaf(
         uniform float uTime;
         uniform float uTurb;
         uniform float uRippleT;
-        ${WATER_HEIGHT_GLSL}`
+        ${WATER_HEIGHT_GLSL}`,
         )
         .replace(
           "#include <project_vertex>",
@@ -370,7 +521,7 @@ export function dressLeaf(
         fWp = modelMatrix * fWp;
         mat3 fV = mat3(viewMatrix);
         mvPosition.xyz += fV[1] * heightLF(fWp.xz, uTime);
-        gl_Position = projectionMatrix * mvPosition;`
+        gl_Position = projectionMatrix * mvPosition;`,
         );
     }
     if (wind) {
@@ -379,7 +530,7 @@ export function dressLeaf(
       shader.vertexShader = shader.vertexShader
         .replace(
           "#include <common>",
-          "#include <common>\nuniform float uTime;\nuniform float uSway;"
+          "#include <common>\nuniform float uTime;\nuniform float uSway;",
         )
         .replace(
           "#include <begin_vertex>",
@@ -392,9 +543,55 @@ export function dressLeaf(
         float ph = iPos.x * 0.8 + iPos.z * 0.63;
         float amp = uSway * max(uv.y - 0.15, 0.0);
         transformed.x += sin(uTime * 1.15 + ph) * amp;
-        transformed.z += cos(uTime * 0.83 + ph * 1.3) * amp * 0.6;`
+        transformed.z += cos(uTime * 0.83 + ph * 1.3) * amp * 0.6;`,
         );
     }
+    // Where this fragment sits on its own CARD, which is not where it sits on the sheet once the
+    // sheet is an atlas. Three things below key off position-on-card -- the root-to-tip shade ramp
+    // and the two noise frequencies -- and all three would be wrong read off vMapUv under the
+    // atlas: a top-row cell starts at v = 0.5, which saturates the ramp so those leaves lose their
+    // shaded base entirely, and halving the uv range halves both noise frequencies on screen.
+    // Identical to vMapUv for every non-atlas caller -- nothing in this project sets a map
+    // transform -- so it is declared unconditionally rather than behind the flag.
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <common>",
+      "#include <common>\nvarying vec2 vLeafUv;",
+    );
+    if (atlas) {
+      /* Pick one of the four shoots, and mirror half of them.
+
+         The cell comes from the instance's own translation rather than from an instanced attribute:
+         instanceMatrix is already bound under USE_INSTANCING, a vine leaf never moves relative to
+         its strand, and an attribute would mean a buffer, an upload, and a JS pass over 913
+         instances to fill it. The alternative that does not touch the shader at all -- one of four
+         separate sheets picked per STRAND -- was rejected because the repeat is worst inside a
+         single strand, where 45 cards sit within a few centimetres of each other.
+
+         Mirrored about the cell's own centre line, where the petiole already sits (canvas x 60-68
+         of 128), so the flip does not walk the stem off the bottom edge of the card. Four cells
+         times two gives eight silhouettes for one texture and one draw call. */
+      shader.vertexShader = shader.vertexShader.replace(
+        "#include <uv_vertex>",
+        `#include <uv_vertex>
+        #ifdef USE_INSTANCING
+          vec3 aP = instanceMatrix[3].xyz;
+        #else
+          vec3 aP = vec3(0.0);
+        #endif
+        float aH = fract(sin(dot(aP, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+        float aC = floor(aH * 4.0);
+        float aM = step(0.5, fract(aH * 61.7));
+        vMapUv = (vec2(mod(aC, 2.0), floor(aC * 0.5))
+                  + vec2(mix(uv.x, 1.0 - uv.x, aM), uv.y)) * 0.5;
+        vLeafUv = uv;`,
+      );
+    } else {
+      shader.vertexShader = shader.vertexShader.replace(
+        "#include <uv_vertex>",
+        "#include <uv_vertex>\nvLeafUv = uv;",
+      );
+    }
+
     /* Dome the blade away from its midrib.
        A card is a flat quad, so it has ONE normal, so it gets ONE lighting value -- measured, a
        near broad leaf swept 25.5 to 32.9 across 140 device pixels, a 1.29:1 gradient where a real
@@ -419,17 +616,17 @@ export function dressLeaf(
         vec3 lAlong = cross(objectNormal, lLat);
         objectNormal = normalize(
           objectNormal + lLat * ((uv.x - 0.5) * 1.1) + lAlong * ((uv.y - 0.5) * 0.34)
-        );`
+        );`,
     );
 
     // Every card is lit flat from root to tip, which is the single fastest tell that a plant is a
     // billboard: in a real clump the base sits inside the clump's own shade and only the top third
-    // sees sky. This is what an AO bake would give, for one mix. `vMapUv` and not `vUv` — three
-    // declares the plain vUv varying only under USE_UV, and every leaf material here has a map.
+    // sees sky. This is what an AO bake would give, for one mix. vLeafUv and not vUv — three
+    // declares the plain vUv varying only under USE_UV — and not vMapUv, which is the atlas cell.
     shader.fragmentShader = shader.fragmentShader.replace(
       "#include <map_fragment>",
       `#include <map_fragment>
-        diffuseColor.rgb *= mix(0.40, 1.0, smoothstep(0.0, 0.58, vMapUv.y));
+        diffuseColor.rgb *= mix(0.40, 1.0, smoothstep(0.0, 0.58, vLeafUv.y));
 
         // A card sampled straight off the sheet carries the painted base-to-tip gradient and
         // nothing else. A luminance profile across a near frond came back with two thirds of
@@ -444,13 +641,60 @@ export function dressLeaf(
         // where those land at 3.7 px and 1.1 px -- drops the grain before it can crawl. The band
         // is wider than the bark's because none of this feeds a threshold: it goes straight onto
         // albedo, so it stays useful down to about two pixels a cell instead of five.
-        float lPx = max(length(fwidth(vMapUv)), 1e-6);
+        float lPx = max(length(fwidth(vLeafUv)), 1e-6);
         float lG1 = 1.0 - smoothstep(0.22, 0.66, lPx * 23.0);
         float lG2 = 1.0 - smoothstep(0.22, 0.66, lPx * 81.0);
-        vec2 lQ = vMapUv * 23.0;
+        vec2 lQ = vLeafUv * 23.0;
         float lC = lNoi(lQ);
-        float lF = lNoi(vMapUv * 81.0 + 17.3);
-        diffuseColor.rgb *= (1.0 + 0.32 * lG1 * (lC - 0.5)) * (1.0 + 0.18 * lG2 * (lF - 0.5));`
+        float lF = lNoi(vLeafUv * 81.0 + 17.3);
+        diffuseColor.rgb *= (1.0 + 0.32 * lG1 * (lC - 0.5)) * (1.0 + 0.18 * lG2 * (lF - 0.5));`,
+    );
+
+    /* Antialias the cutout silhouette, which nothing else in the pipeline does.
+
+       MSAA is on and it is not the answer. The drawing buffer reports SAMPLES 4 / SAMPLE_BUFFERS 1
+       at the native 2880x1640, but multisampling resolves TRIANGLE edges, and a leaf outline is not
+       one -- it is an alpha boundary in the middle of a quad, and every sample inside that quad
+       passes or fails the same alphaTest together. So the silhouette gets whatever alphaToCoverage
+       gives it and nothing more. Measured on the hero frame, a horizontal run across a vine leaflet
+       at y=235 went 57.6 -> 42.2 luma between two adjacent pixels on the way in and 30.4 -> 53.0 on
+       the way out: not one intermediate value at either crossing. A hard binary staircase, which is
+       exactly the "Minecraft" read.
+
+       The cause is the formula three uses when ALPHA_TO_COVERAGE is defined:
+
+         diffuseColor.a = smoothstep(alphaTest, alphaTest + fwidth(diffuseColor.a), diffuseColor.a);
+
+       Its transition band is `fwidth` wide in ALPHA units and sits entirely ABOVE the cutoff. That
+       is written for a signed-distance sheet, where alpha ramps gently over many texels and fwidth
+       is a few hundredths. These sheets are canvas rasterisations: the ramp is the one texel of 2D
+       antialiasing at the shape border. A vine card is 0.31 world units at 8.5m, which is 95 device
+       pixels against a 128 texel sheet -- 0.74, so a screen pixel steps 1.35 texels and fwidth(a)
+       comes back at essentially 1.0, the whole range. smoothstep(0.45, 1.45, a) then sends a=0.5 to
+       0.007 and even a=0.9 only to 0.43, so every fragment on the ramp rounds to zero of four
+       samples and discards. The band is so wide it swallows the ramp whole, and the edge falls back
+       to binary one pixel inside where it belongs.
+
+       The centred form below measures the band in PIXELS instead. (a - alphaTest) / fwidth(a) is the
+       signed distance from this fragment to the alphaTest isoline expressed in pixels -- exactly the
+       quantity fwidth exists to produce -- so adding 0.5 and clamping gives the fragment's coverage
+       under a one pixel box filter, which is what a resolve wants and what alphaToCoverage will
+       quantise to its four samples. It is not a softening: interior fragments have fwidth 0, saturate
+       to 1 and are bit-identical to before, and only the one pixel straddling the outline changes.
+       Free, too -- fwidth of the same value three was already taking fwidth of.
+
+       It replaces the chunk rather than running after it because the chunk discards; anything that
+       fires later never sees the fragments that needed rescuing. Guarded on USE_ALPHATEST because
+       `alphaTest` is only declared under it (alphatest_pars_fragment), and a leaf material without
+       one would otherwise fail to compile. */
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <alphatest_fragment>",
+      `#ifdef USE_ALPHATEST
+          diffuseColor.a = clamp(
+            (diffuseColor.a - alphaTest) / max(fwidth(diffuseColor.a), 1e-5) + 0.5, 0.0, 1.0
+          );
+          if (diffuseColor.a == 0.0) discard;
+        #endif`,
     );
 
     // A leaf card is an impostor, and Fresnel is where that lie shows up worst.
@@ -479,7 +723,7 @@ export function dressLeaf(
     // facing the camera keeps the 0.04 it always had and its shading is untouched.
     shader.fragmentShader = shader.fragmentShader.replace(
       "#include <lights_physical_fragment>",
-      "#include <lights_physical_fragment>\n\tmaterial.specularF90 = 0.30;"
+      "#include <lights_physical_fragment>\n\tmaterial.specularF90 = 0.30;",
     );
 
     if (trans > 0) {
@@ -489,7 +733,7 @@ export function dressLeaf(
       shader.fragmentShader = shader.fragmentShader
         .replace(
           "#include <common>",
-          "#include <common>\nuniform vec3 uSunView;\nuniform vec3 uTrans;\nuniform float uTransAmt;"
+          "#include <common>\nuniform vec3 uSunView;\nuniform vec3 uTrans;\nuniform float uTransAmt;",
         )
         .replace(
           "#include <tonemapping_fragment>",
@@ -519,11 +763,12 @@ export function dressLeaf(
            is green; this term cannot make a grey-cream pixel. See the specularF90 note above. */
         vec3 tThru = min(diffuseColor.rgb * 3.2 + 0.035, vec3(1.0));
         gl_FragColor.rgb += uTrans * (wrapLit * (0.42 + 0.58 * towardSun) * uTransAmt) * tThru;
-        #include <tonemapping_fragment>`
+        #include <tonemapping_fragment>`,
         );
     }
   };
-  mat.customProgramCacheKey = () => `leaf|${wind ? 1 : 0}|${afloat ? 1 : 0}|${trans}`;
+  mat.customProgramCacheKey = () =>
+    `leaf|${wind ? 1 : 0}|${afloat ? 1 : 0}|${trans}|${atlas ? 1 : 0}`;
 }
 
 /** Kept as the old name so the existing frond call site reads the same. */
@@ -545,7 +790,7 @@ function stalk(
   s: Stalk,
   mode: "mask" | "color",
   c0: string,
-  c1: string
+  c1: string,
 ) {
   const dx = Math.sin(s.a);
   const dy = -Math.cos(s.a);
@@ -599,7 +844,7 @@ function almond(
   wid: number,
   rot: number,
   mode: "mask" | "color",
-  col: string
+  col: string,
 ) {
   const dx = Math.cos(rot) * len * 0.5;
   const dy = Math.sin(rot) * len * 0.5;
@@ -626,6 +871,284 @@ function almond(
 }
 
 /** The heart of a bel leaf: tip at local (0, 1), the notch and its two lobes at local -y. */
+/** Bezier control points of `leaflet`'s outline, in its own local frame. See `fit`. */
+const LEAFLET_HULL: [number, number][] = [
+  [0, 1],
+  [0, -1],
+  [-0.6, 0.3],
+  [0.6, 0.3],
+  [-0.78, -0.06],
+  [0.78, -0.06],
+  [-0.52, -0.8],
+  [0.52, -0.8],
+  [-0.44, 0.62],
+  [0.44, 0.62],
+];
+
+/**
+ * The largest radius at which a leaflet hung off (sx, sy) still lies inside its own atlas cell.
+ *
+ * Cells are neighbours here, not sheet edge. On the old single-shoot sheet a blade that overran
+ * the canvas was simply cropped; on the atlas it lands on an unrelated card as a floating fragment
+ * of leaf, which is worse than the crop ever was. So the size is derived from the room rather than
+ * assumed to fit: a Bezier lies inside the convex hull of its own control points, so bounding the
+ * ten controls bounds the outline, and each of the four cell edges turns into an upper bound on r.
+ *
+ * The bottom edge is at 127 rather than inset like the other three, because the petiole has to
+ * reach it -- the card's pivot is at uv.y 0 and any transparent margin under the ink is a visible
+ * gap between the leaf and the stem it hangs from. The other three sit 5-6 texels in, which is
+ * past the four texels `dilate` bleeds colour outward from a solid edge.
+ */
+function fit(
+  ox: number,
+  oy: number,
+  sx: number,
+  sy: number,
+  lat: number,
+  off: number,
+  rot: number,
+  sq: number,
+) {
+  const c = Math.cos(rot);
+  const sn = Math.sin(rot);
+  let r = Infinity;
+  const cap = (room: number, d: number) => {
+    if (d > 1e-4) r = Math.min(r, room / d);
+  };
+  for (const [hx, hy] of LEAFLET_HULL) {
+    const px = hx * sq;
+    const dx = lat + (px * c - hy * sn);
+    const dy = off + (px * sn + hy * c);
+    cap(ox + 123 - sx, dx);
+    cap(sx - (ox + 5), -dx);
+    cap(oy + 127 - sy, dy);
+    cap(sy - (oy + 6), -dy);
+  }
+  return r;
+}
+
+/**
+ * One shoot of the vine-spray atlas, drawn into the 128-texel cell whose top-left is (ox, oy).
+ *
+ * The old spray drew its leaflets straight onto the runner and let them overlap into a slab. That
+ * was a fix for a measured fault and it stays fixed: a gap between strands came back at (144,136,110)
+ * against a leaf at (30,50,31), the sky's own colour at 5.4:1, so every hole THROUGH the mass read
+ * as a bright slash cut across the vine. What changed is where the air goes -- the interior stays
+ * closed, and the variety is spent on the outline instead, where the background behind it is the
+ * canopy rather than the sky.
+ */
+function shoot(
+  ctx: CanvasRenderingContext2D,
+  mode: "mask" | "color",
+  ox: number,
+  oy: number,
+  s: Shoot,
+) {
+  const rnd = rng(s.seed);
+  // Which flank the next leaflet goes on. Strict left-right-left is a comb rather than a shoot:
+  // at 4x the two smaller cells read as fern fronds, nine leaflets alternating perfectly along an
+  // evenly divided stem. Alternate phyllotaxy is a spiral seen flat, so it skips.
+  let sd = 1;
+  /** Where along the runner the leaflets are widest. See the size ramp in the loop. */
+  const peak = 0.3 + 0.42 * rnd();
+  const bx = ox + 64;
+  const p0x = bx;
+  const p0y = oy + 125;
+  const p1x = bx + s.bow;
+  const p1y = oy + 70;
+  const p2x = bx + s.drift;
+  const p2y = oy + 15;
+  const R = (t: number) => {
+    const u = 1 - t;
+    return [
+      u * u * p0x + 2 * u * t * p1x + t * t * p2x,
+      u * u * p0y + 2 * u * t * p1y + t * t * p2y,
+    ] as [number, number];
+  };
+
+  // The petiole, flush to the bottom edge of its own cell. See the note on insets in sprayTexture.
+  ctx.fillStyle = mode === "mask" ? "#fff" : "#4a3a23";
+  ctx.fillRect(bx - 4, oy + 104, 8, 24);
+
+  ctx.strokeStyle = mode === "mask" ? "#fff" : "#4c6130";
+  ctx.lineWidth = 4.6;
+  ctx.beginPath();
+  ctx.moveTo(p0x, p0y);
+  ctx.quadraticCurveTo(p1x, p1y, p2x, p2y);
+  ctx.stroke();
+
+  for (let i = 0; i < s.n; i++) {
+    // Leaflets run almost the whole length of the runner. The low ones used to start at t = 0.26
+    // to keep a blade -- which reaches about 1.25r below its own attachment -- off the bottom edge,
+    // but `fit` now derives that limit per leaflet from the four cell edges, so the reservation is
+    // paid twice: once by fit shrinking the blade and once by the runner going bare beneath it.
+    const t = 0.14 + (0.84 * (i + 0.44 * (rnd() - 0.5))) / (s.n - 1);
+    const [sx, sy] = R(t);
+    if (rnd() > 0.16) sd = -sd;
+    const side = sd;
+    // Foreshortening about the leaflet's own midrib. A shoot carries its leaflets at every angle
+    // to the eye and half of them are turned away; nine at one width are nine copies of one stamp.
+    const sq = 0.42 + 0.62 * rnd();
+    // Positive rot swings the tip toward -x, so the sign is flipped to hang each leaflet outward.
+    // Base leaflets spread wide and tip leaflets hang straight down, which is what the plant does
+    // and also what keeps the largest blades -- the basal ones -- inside their own cell.
+    const rot = -side * (1.06 - 0.3 * t + 0.22 * rnd()) + s.hang;
+    const lat = side * (0.4 + 0.26 * rnd());
+    const off = 0.46 + 0.22 * rnd();
+    // Widest mid-shoot, smaller at the attachment and again at the growing tip, with the widest
+    // point in a different place in every cell. A monotone base-to-tip taper draws a cone, and four
+    // cones in one atlas are four copies of a single stamp with the leaflets shuffled -- which is
+    // the repeat this atlas exists to break. Held afterwards to whatever the cell can take.
+    const u = t < peak ? (0.5 * t) / peak : 0.5 + (0.5 * (t - peak)) / (1 - peak);
+    const r = Math.min(
+      fit(ox, oy, sx, sy, lat, off, rot, sq),
+      s.r * (0.74 + 0.4 * Math.sin(Math.PI * u)) * (0.8 + 0.42 * rnd()),
+    );
+    if (r < 4) continue;
+    const lx = sx + lat * r;
+    const ly = sy + off * r;
+    // Where leaflet()'s local (0,-1) lands, which is the end the petiolule has to reach.
+    ctx.strokeStyle = mode === "mask" ? "#fff" : "#54692f";
+    ctx.lineWidth = 2.6;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(lx + Math.sin(rot) * r, ly - Math.cos(rot) * r);
+    ctx.stroke();
+    const k = rnd();
+    // One leaflet in fourteen is going over. A shoot with no straw in it reads as manufactured.
+    const col =
+      rnd() < 0.07 ? shade("#a09055", 0.72 + 0.4 * k, 0.28) : shade("#6f8f42", 0.42 + 0.98 * k * k);
+    leaflet(ctx, lx, ly, r, rot, sq, mode, col);
+  }
+
+  if (mode === "color") {
+    // One light direction for the whole shoot, and a different one per cell. Every leaflet above
+    // carries its own base-to-tip ramp, which is what a leaf does on its own; none of them knows
+    // where the sun is, and nine independently lit leaflets on one twig is the other half of the
+    // plastic read. Multiply, so it scales what is underneath rather than washing grey over it,
+    // and bounded to this cell so it cannot reach its neighbours. Outside the cutout the alpha is
+    // zero, so darkening the field there costs nothing -- dilate only ever reads solid texels.
+    const g = ctx.createLinearGradient(
+      ox + 64 - s.lx * 88,
+      oy + 64 - s.ly * 88,
+      ox + 64 + s.lx * 88,
+      oy + 64 + s.ly * 88,
+    );
+    g.addColorStop(0, "#8c8c8c");
+    g.addColorStop(0.55, "#d8d8d8");
+    g.addColorStop(1, "#ffffff");
+    ctx.save();
+    ctx.globalCompositeOperation = "multiply";
+    ctx.fillStyle = g;
+    ctx.fillRect(ox, oy, 128, 128);
+    ctx.restore();
+  }
+}
+
+/**
+ * One bel leaflet: ovate, entire-margined, with an acuminate drip tip.
+ *
+ * `heart()` below draws a cordate blob, which is right for the undergrowth sprig and wrong here.
+ * At 2.2r wide against 1.95r tall, with two basal lobes filling the waist, it is a circle -- and a
+ * row of circles on a runner is exactly what the vine sprays looked like at 4x. This is 1.2r wide
+ * against 2r tall with the shoulders at a third of the height and the tip drawn out over the top
+ * fifth: the tip tangent leaves the apex at 17 degrees off the midrib, which is the outline that
+ * still reads as a leaf at forty pixels rather than as a pebble.
+ *
+ * `squash` foreshortens about the midrib BEFORE the rotation, which is the term that does most of
+ * the work -- see the note in shoot(). Under a third of full width the lamina is thinner than its
+ * own veins would be, so the vein pass is skipped rather than drawn on a sliver.
+ *
+ * Separate from heart() rather than a widened heart(): the undergrowth creeper still calls that one
+ * with the same signature, and a cordate blob is the correct shape there.
+ */
+function leaflet(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  r: number,
+  rot: number,
+  squash: number,
+  mode: "mask" | "color",
+  col: string,
+) {
+  const c = Math.cos(rot);
+  const sn = Math.sin(rot);
+  /** Leaf-local (x across the midrib, y from base +1 at the tip) to canvas. */
+  const P = (lx: number, ly: number) => {
+    const sx = lx * squash;
+    return [x + (sx * c - ly * sn) * r, y + (sx * sn + ly * c) * r] as [number, number];
+  };
+  const B = (ax: number, ay: number, bx: number, by: number, ex: number, ey: number) => {
+    const a = P(ax, ay);
+    const b = P(bx, by);
+    const e = P(ex, ey);
+    ctx.bezierCurveTo(a[0], a[1], b[0], b[1], e[0], e[1]);
+  };
+  const tip = P(0, 1);
+  const base = P(0, -1);
+
+  ctx.beginPath();
+  ctx.moveTo(tip[0], tip[1]);
+  B(-0.06, 0.8, -0.44, 0.62, -0.6, 0.3); // tip -> left shoulder
+  B(-0.78, -0.06, -0.52, -0.8, 0, -1); // left shoulder -> base
+  B(0.52, -0.8, 0.78, -0.06, 0.6, 0.3); // base -> right shoulder
+  B(0.44, 0.62, 0.06, 0.8, 0, 1); // right shoulder -> tip
+  ctx.closePath();
+
+  if (mode === "mask") {
+    ctx.fillStyle = "#fff";
+    ctx.fill();
+    return;
+  }
+
+  const g = ctx.createLinearGradient(base[0], base[1], tip[0], tip[1]);
+  g.addColorStop(0, shade(col, 0.4));
+  g.addColorStop(0.55, col);
+  g.addColorStop(1, shade(col, 1.14));
+  ctx.fillStyle = g;
+  ctx.fill();
+
+  // Across the midrib, over the top of the axial ramp. A leaflet is a curled surface: one flank
+  // faces the light and the other turns away from it. Without this every leaflet carries its
+  // highlight in the same place relative to its own outline, which is the tell that reads as
+  // moulded plastic no matter how carefully the outlines themselves vary.
+  const l = P(-1, 0.1);
+  const rt = P(1, 0.1);
+  const gx = ctx.createLinearGradient(l[0], l[1], rt[0], rt[1]);
+  gx.addColorStop(0, "rgba(0,0,0,0.34)");
+  gx.addColorStop(0.42, "rgba(0,0,0,0)");
+  gx.addColorStop(0.72, "rgba(255,255,255,0.1)");
+  gx.addColorStop(1, "rgba(0,0,0,0.2)");
+  ctx.fillStyle = gx;
+  ctx.fill();
+
+  if (squash < 0.34) return;
+  // Pinnate and clipped to the lamina. heart()'s five straight rays from one point overshot the
+  // outline and read as scratches laid over the leaf; these curve toward the tip the way a real
+  // secondary vein does, and stop at the margin because the path is still the clip region.
+  ctx.save();
+  ctx.clip();
+  ctx.strokeStyle = shade(col, 1.26);
+  ctx.globalAlpha = 0.42;
+  ctx.lineWidth = Math.max(0.8, r * 0.045);
+  ctx.beginPath();
+  ctx.moveTo(base[0], base[1]);
+  ctx.lineTo(tip[0], tip[1]);
+  for (let i = 0; i < 5; i++) {
+    const v = -0.62 + i * 0.34;
+    const st = P(0, v);
+    for (const sg of [-1, 1]) {
+      const m = P(sg * 0.3, v + 0.1);
+      const e = P(sg * 0.52, v + 0.3);
+      ctx.moveTo(st[0], st[1]);
+      ctx.quadraticCurveTo(m[0], m[1], e[0], e[1]);
+    }
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
 function heart(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -633,7 +1156,7 @@ function heart(
   r: number,
   rot: number,
   mode: "mask" | "color",
-  col: string
+  col: string,
 ) {
   const c = Math.cos(rot);
   const s = Math.sin(rot);
@@ -709,11 +1232,11 @@ export const grassTexture = () =>
           { a, len, wid, curl },
           mode,
           shade("#22301a", 0.72 + 0.66 * k),
-          d < 0.085 ? shade("#a89a62", 0.7 + 0.52 * k, 0.24) : shade("#87a44b", 0.44 + 0.96 * k)
+          d < 0.085 ? shade("#a89a62", 0.7 + 0.52 * k, 0.24) : shade("#87a44b", 0.44 + 0.96 * k),
         );
       }
     },
-    "#43592a"
+    "#43592a",
   );
 
 /** Sedge at the waterline: taller, thinner, nearly upright. */
@@ -737,11 +1260,11 @@ export const reedTexture = () =>
           mode,
           shade("#1c2a14", 0.7 + 0.7 * k),
           // sedge browns off at the tip more readily than grass does, so the straw share is higher
-          d < 0.16 ? shade("#a49356", 0.72 + 0.5 * k, 0.26) : shade("#7f9a4e", 0.5 + 0.92 * k)
+          d < 0.16 ? shade("#a49356", 0.72 + 0.5 * k, 0.26) : shade("#7f9a4e", 0.5 + 0.92 * k),
         );
       }
     },
-    "#3c5324"
+    "#3c5324",
   );
 
 /** A shrub, read at two hundred pixels as a silhouette with a lit crown — so it is built back to
@@ -787,12 +1310,14 @@ export const bushTexture = () =>
             len * (0.28 + 0.14 * rnd()),
             rot,
             mode,
-            d < 0.06 ? shade("#9d8b57", 0.62 + 0.5 * kk, 0.28) : shade(SHADE[pass], 0.6 + 0.78 * kk)
+            d < 0.06
+              ? shade("#9d8b57", 0.62 + 0.5 * kk, 0.28)
+              : shade(SHADE[pass], 0.6 + 0.78 * kk),
           );
         }
       }
     },
-    "#2b3c1c"
+    "#2b3c1c",
   );
 
 /** Bel — a climbing shoot of heart-shaped leaves off one runner. */
@@ -910,7 +1435,12 @@ export const litterTexture = () =>
         ctx.strokeStyle = shade("#5c3d16", 0.85 + 0.4 * rnd());
         ctx.beginPath();
         ctx.moveTo(x0, y0);
-        ctx.quadraticCurveTo(x0 + side * w * 0.55, y0 - LEN * 0.045, x0 + side * w * 0.9, y0 - LEN * 0.1);
+        ctx.quadraticCurveTo(
+          x0 + side * w * 0.55,
+          y0 - LEN * 0.045,
+          x0 + side * w * 0.9,
+          y0 - LEN * 0.1,
+        );
         ctx.stroke();
       }
 
@@ -930,7 +1460,7 @@ export const litterTexture = () =>
       }
       ctx.globalAlpha = 1;
     },
-    "#48330f"
+    "#48330f",
   );
 
 export const belTexture = () =>
@@ -971,9 +1501,9 @@ export const belTexture = () =>
           r,
           -side * 0.62,
           mode,
-          d < 0.07 ? shade("#a09055", 0.7 + 0.4 * k, 0.26) : shade("#6f8f42", 0.52 + 0.86 * k)
+          d < 0.07 ? shade("#a09055", 0.7 + 0.4 * k, 0.26) : shade("#6f8f42", 0.52 + 0.86 * k),
         );
       }
     },
-    "#41582a"
+    "#41582a",
   );

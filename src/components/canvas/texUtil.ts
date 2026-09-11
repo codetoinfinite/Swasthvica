@@ -1,6 +1,21 @@
 import * as THREE from "three";
 
 /**
+ * Anisotropic taps.
+ *
+ * 16, because the device offers 16: MAX_TEXTURE_MAX_ANISOTROPY_EXT reads 16 on the target GPU and
+ * three silently clamps anything larger, so this is a ceiling and not a wish. It used to be 8, set
+ * back when the drawing buffer was capped below the panel and the extra taps had nothing to
+ * resolve. They do now.
+ *
+ * It is only ever paid where it is needed. The hardware compares the two texture-space derivatives
+ * per fragment and takes taps in proportion to the ratio, so a leaf card facing the camera costs
+ * exactly one and the same card lying flat on the floor -- the ground cover, which is the case that
+ * was smearing -- costs the full sixteen. Nothing in this scene is fill-bound; see src/lib/quality.ts.
+ */
+export const ANISOTROPY = 16;
+
+/**
  * `alphaMap` samples the GREEN channel — three's alphamap_fragment is
  * `diffuseColor.a *= texture2D( alphaMap, vAlphaMapUv ).g;`. A canvas fill is unpremultiplied,
  * so a blurred/feathered shape puts its ramp in ALPHA while green stays a flat 255 across the
@@ -21,7 +36,7 @@ import * as THREE from "three";
  */
 export function rampTexture(canvas: HTMLCanvasElement) {
   const tex = new THREE.CanvasTexture(canvas);
-  tex.anisotropy = 8;
+  tex.anisotropy = ANISOTROPY;
   return tex;
 }
 
@@ -296,7 +311,7 @@ function buildMips(base: Uint8ClampedArray, size: number) {
 export function cutoutTexture(
   size: number,
   draw: (ctx: CanvasRenderingContext2D, mode: "mask" | "color") => void,
-  field: string
+  field: string,
 ) {
   const mk = () => {
     const c = document.createElement("canvas");
@@ -319,7 +334,7 @@ export function cutoutTexture(
 
   const tex = new THREE.CanvasTexture(cc);
   tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 8;
+  tex.anisotropy = ANISOTROPY;
   // Hand the chain over rather than letting the driver build it. three takes manual mipmaps for a
   // regular canvas texture -- getMipLevels reads mipmaps.length, and each level is uploaded with
   // texSubImage2D at its own level index instead of generateMipmap (WebGLTextures.js).

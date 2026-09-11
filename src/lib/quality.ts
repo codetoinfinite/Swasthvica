@@ -1,23 +1,39 @@
 /**
  * Device quality tiers.
  *
- * Measured on the reference machine at 1440x716 CSS / devicePixelRatio 2, the home scene costs
- * `2.21 ms + 3.18 ms per megapixel` of drawing buffer with MSAA 4x, and `1.55 + 2.39` without it.
- * Two things follow.
+ * THE CEILING IS THE DISPLAY, NOT A FRACTION OF IT. A drawing buffer smaller than the physical
+ * pixel grid is not a cheaper version of the same picture -- the browser *upscales* it, so a 1.5x
+ * buffer on a 2x display is resampled 1.333x on its way to the panel and every edge in the frame
+ * arrives blurred and stepped at once. That is the single largest fidelity lever there is, it is
+ * binary rather than gradual, and it costs less than the arithmetic suggests.
  *
- * First, resolution is the only large lever. Removal deltas across every object in the scene sum
- * to a *negative* number -- hiding an occluder makes what is behind it cost more -- so there is no
- * hotspot to cut. The frame is 59% PBR fragment shading spread evenly over 431k triangles, and the
- * honest way to make that cheaper is to shade fewer pixels.
+ * Re-measured headful on an Apple M5 (ANGLE Metal, 10 cores, 2x display, 1440x820 CSS), cold, with
+ * MSAA 4x on, and fitting `t = a + b * megapixels` through the two ends:
  *
- * Second, MSAA stays on at every tier. Three materials in this scene set `alphaToCoverage`
- * (Undergrowth, Vines, Jungle fronds) and that flag resolves against the MSAA buffer or does
- * nothing at all; without it every cutout leaf in the frame goes back to a hard alphaTest edge.
- * The tempting trade -- drop MSAA, spend the savings on resolution -- assumes the browser
- * downscales the buffer and supersamples the edges for free. It does not: at `dpr 1.75` on a 2x
- * display the 2520px buffer is *upscaled* to 2880 physical pixels, so there is no supersampling
- * underneath to fall back on. MSAA at a lower dpr costs about what no-MSAA at a higher dpr does
- * (8.19 ms at dpr 1.35 vs 7.9 ms at dpr 1.6) and keeps the cutouts. Buy the edges.
+ *     dpr 1.50   2160x1230   2.66 MP    9.4 ms
+ *     dpr 2.00   2880x1640   4.72 MP   11.8 ms
+ *     ==> 6.3 ms fixed + 1.17 ms per megapixel
+ *
+ * The frame is dominated by a ~6.3 ms fixed cost -- draw call submission and 431k triangles of
+ * geometry -- and shades pixels at a sixth of the rate the old reference figure assumed. Native
+ * resolution therefore costs +2.4 ms out of a 16.7 ms budget, which is affordable, and every tier
+ * below high now targets the panel it is on rather than a fraction of it.
+ *
+ * MSAA stays on at every tier, and on this class of GPU it is close to free: paired cold runs read
+ * 11.8 ms with it and 12.2 ms without, paired warm runs 20.5 ms and 19.8 ms. Apple's tile-based
+ * renderer resolves multisamples in on-chip tile memory and never pays the bandwidth an immediate
+ * mode GPU would. The old note here quoted `3.18` vs `2.39 ms/MP` from a different machine and
+ * concluded MSAA was a real cost worth defending; on this one there is nothing to defend against.
+ * It stays for the reason that survives either measurement: three materials in this scene set
+ * `alphaToCoverage` (Undergrowth, Vines, Jungle fronds) and that flag resolves against the
+ * multisample buffer or does nothing at all, so without it every cutout leaf in the frame goes
+ * back to a hard alphaTest edge.
+ *
+ * BENCHMARKING NOTE FOR WHOEVER RE-MEASURES THIS. Run to run drift on a laptop is larger than
+ * every lever in this file: the same build measured 11.8 ms cold and 20.5 ms after four minutes of
+ * back-to-back runs with the operator's own browser open. Only paired, interleaved, cold
+ * measurements mean anything here. A single sweep run top to bottom will "prove" whichever option
+ * happened to go first.
  */
 
 export type Tier = "low" | "mid" | "high";
@@ -26,7 +42,13 @@ export type Quality = {
   tier: Tier;
   /** [min, max] passed to r3f; it clamps devicePixelRatio into this range. */
   dpr: [number, number];
-  /** floor for the adaptive PerformanceMonitor, which may push below `dpr[0]`. */
+  /**
+   * The worst resolution the runtime monitor may fall back to, absolute, not a fraction.
+   *
+   * It is a floor and not a starting point: the scene opens at the ceiling and only ever walks
+   * down from measured frame times. High's floor is what used to be its ceiling, so the very worst
+   * a fast machine can now settle on is the picture the site used to open with.
+   */
   dprFloor: number;
   /**
    * No "soft" tier. three deprecated PCFSoftShadowMap in r183 and WebGLShadowMap.render now
@@ -50,8 +72,10 @@ export type Quality = {
 
 const TIERS: Record<Tier, Omit<Quality, "tier">> = {
   high: {
-    dpr: [1, 1.5],
-    dprFloor: 1,
+    // Native. On a 2x display this is a 1:1 buffer with no resample between the render and the
+    // panel, which is the whole point; on a 1x display r3f clamps it back down to 1.
+    dpr: [1, 2],
+    dprFloor: 1.5,
     shadows: "percentage",
     shadowMap: 2048,
     density: 1,
@@ -61,8 +85,8 @@ const TIERS: Record<Tier, Omit<Quality, "tier">> = {
     texSize: 2048,
   },
   mid: {
-    dpr: [1, 1.25],
-    dprFloor: 0.85,
+    dpr: [1, 1.5],
+    dprFloor: 1,
     shadows: "percentage",
     shadowMap: 1024,
     density: 0.55,
@@ -72,8 +96,10 @@ const TIERS: Record<Tier, Omit<Quality, "tier">> = {
     texSize: 1024,
   },
   low: {
+    // The one tier that still renders below its panel. A phone that scored this low is bandwidth
+    // bound before it is anything else, and 0.6 was far enough down to be visible as mush.
     dpr: [0.75, 1],
-    dprFloor: 0.6,
+    dprFloor: 0.75,
     shadows: "basic",
     shadowMap: 512,
     density: 0.28,
@@ -98,7 +124,7 @@ function isSoftwareRenderer(): boolean {
     const ext = (gl as WebGLRenderingContext).getExtension("WEBGL_debug_renderer_info");
     if (!ext) return false;
     const r = String(
-      (gl as WebGLRenderingContext).getParameter(ext.UNMASKED_RENDERER_WEBGL) ?? ""
+      (gl as WebGLRenderingContext).getParameter(ext.UNMASKED_RENDERER_WEBGL) ?? "",
     ).toLowerCase();
     return /swiftshader|llvmpipe|software|basic render/.test(r);
   } catch {
@@ -113,7 +139,8 @@ function detect(): Tier {
   const coarse = window.matchMedia?.("(pointer: coarse)").matches ?? false;
   const cores = navigator.hardwareConcurrency ?? 4;
   const mem = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 4;
-  const px = window.innerWidth * window.innerHeight * Math.min(window.devicePixelRatio || 1, 2) ** 2;
+  const px =
+    window.innerWidth * window.innerHeight * Math.min(window.devicePixelRatio || 1, 2) ** 2;
 
   // A phone is a tile-based GPU with a shared memory bus driving a very dense display. It is the
   // one case where the proxies agree, so it starts two rungs down and has to earn its way back.
@@ -132,14 +159,12 @@ function detect(): Tier {
 let cached: Quality | null = null;
 
 /** Resolved once per page load. Instance counts cannot change without a remount, so re-running
- *  this on resize would buy nothing -- runtime adaptation is the PerformanceMonitor's job.
+ *  this on resize would buy nothing -- runtime adaptation is AdaptiveDpr's job.
  *  `?q=low` forces a tier, which is the only way to check a phone budget on a desktop GPU. */
 export function quality(): Quality {
   if (!cached) {
     const forced =
-      typeof window !== "undefined"
-        ? new URLSearchParams(window.location.search).get("q")
-        : null;
+      typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("q") : null;
     const tier: Tier =
       forced === "low" || forced === "mid" || forced === "high" ? forced : detect();
     cached = { tier, ...TIERS[tier] };
