@@ -19,6 +19,12 @@ module.exports = {
       { jsc: { parser: { syntax: "typescript", decorators: true }, target: "es2021" } },
     ],
   },
+  // The HTTP suite talks to a real Postgres and a real Redis, and both have to be addressed before
+  // `@medusajs/test-utils` is imported. `setupFiles` is the only hook that runs that early.
+  setupFiles:
+    process.env.TEST_TYPE === "integration:http"
+      ? ["<rootDir>/integration-tests/setup-env.ts"]
+      : [],
   testMatch:
     process.env.TEST_TYPE === "integration:http"
       ? ["**/integration-tests/http/**/*.spec.[jt]s"]

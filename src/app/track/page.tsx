@@ -18,7 +18,7 @@ export default function TrackPage() {
     <PolicyPage
       eyebrow="Your order"
       title="Where is my order"
-      standfirst="Every parcel goes out with a courier tracking number, and that number is e-mailed to you the moment it is handed over. If it has not arrived, this page is how to reach the person who can find it."
+      standfirst="Every parcel goes out with a courier tracking number, and that number is e-mailed to you the moment it is handed over. If the e-mail has not arrived, look the order up below with its reference — and if the answer is not the one you wanted, the people who can chase it are on this page too."
       updated={null}
     >
       <JsonLd
@@ -45,16 +45,17 @@ export default function TrackPage() {
         writing to us about, and we will chase it rather than asking you to.
       </p>
 
-      <h2>Ask about a specific order</h2>
+      <h2>Look up your order</h2>
       <TrackView />
 
       <h2>If the parcel is late, damaged or wrong</h2>
       <p>
         Tell us within the window set out in the{" "}
-        <IntentLink href="/refunds">cancellation and refunds policy</IntentLink> — {TERMS.returnWindowDays}{" "}
-        days from delivery — and send a photograph if something arrived broken. A replacement or a
-        refund is settled in {TERMS.refundDays} once we have looked at it. You do not need to argue
-        the point: a seal that failed in transit is our problem, not yours.
+        <IntentLink href="/refunds">cancellation and refunds policy</IntentLink> —{" "}
+        {TERMS.returnWindowDays} days from delivery — and send a photograph if something arrived
+        broken. A replacement or a refund is settled in {TERMS.refundDays} once we have looked at
+        it. You do not need to argue the point: a seal that failed in transit is our problem, not
+        yours.
       </p>
       <p>
         If a complaint is not resolved to your satisfaction, it escalates to a named grievance

@@ -93,6 +93,35 @@ export function storeApi(): Medusa {
 }
 
 /**
+ * A POST to the Store API with the whole response handed back, headers and all.
+ *
+ * `storeApi()` is the right door for almost everything, but `client.fetch` collapses a non-2xx into
+ * a `FetchError` carrying the message and the status and nothing else -- the response headers and
+ * the parsed body are dropped (@medusajs/js-sdk/dist/esm/client.js:96-98). `Retry-After` is the one
+ * fact the tracking form needs from a refusal, so that lane reads the response itself.
+ *
+ * The timeout is not decoration. This runs inside a Next route handler answering a browser: without
+ * it, a Medusa that accepts the connection and then stops talking holds the request open until the
+ * platform kills it, and the customer watches a spinner until then. Eight seconds is far past any
+ * healthy response and short enough to still be an answer.
+ */
+export function storePost(path: string, body: unknown, timeoutMs = 8000): Promise<Response> {
+  if (!BASE_URL || !PUBLISHABLE_KEY) {
+    throw new Error("MEDUSA_URL and MEDUSA_PUBLISHABLE_KEY must both be set.");
+  }
+  return fetch(`${BASE_URL}${path}`, {
+    method: "POST",
+    cache: "no-store",
+    headers: {
+      "content-type": "application/json",
+      "x-publishable-api-key": PUBLISHABLE_KEY,
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+}
+
+/**
  * The region whose prices we quote.
  *
  * Not an env var. `region_id` is a required pricing context on every store product read -- without

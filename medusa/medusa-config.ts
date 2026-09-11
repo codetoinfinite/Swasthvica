@@ -1,6 +1,7 @@
 import { loadEnv, defineConfig, Modules } from "@medusajs/framework/utils";
 import { GST_PROVIDER_ID } from "./src/modules/india-gst";
 import { RZP_PROVIDER_ID } from "./src/modules/razorpay";
+import { requireOrigins } from "./src/lib/cors";
 
 loadEnv(process.env.NODE_ENV || "development", process.cwd());
 
@@ -38,6 +39,15 @@ function required(name: string): string {
 }
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
+
+/**
+ * Which of the three CORS lists a deployment may keep loose.
+ *
+ * None of them, in production. See src/lib/cors.ts for what is refused and why -- the short version
+ * is that all three are configured with `credentials: true`, so an entry on any of them can read a
+ * logged-in customer's or an admin's responses.
+ */
+const NODE_ENV = process.env.NODE_ENV || "development";
 
 /**
  * "worker" runs jobs and subscribers with no HTTP server; "server" is the reverse; "shared" is one
@@ -110,9 +120,9 @@ module.exports = defineConfig({
     redisUrl: REDIS_URL,
     workerMode: WORKER_MODE,
     http: {
-      storeCors: required("STORE_CORS"),
-      adminCors: required("ADMIN_CORS"),
-      authCors: required("AUTH_CORS"),
+      storeCors: requireOrigins("STORE_CORS", process.env.STORE_CORS, NODE_ENV),
+      adminCors: requireOrigins("ADMIN_CORS", process.env.ADMIN_CORS, NODE_ENV),
+      authCors: requireOrigins("AUTH_CORS", process.env.AUTH_CORS, NODE_ENV),
       jwtSecret: required("JWT_SECRET"),
       cookieSecret: required("COOKIE_SECRET"),
     },
