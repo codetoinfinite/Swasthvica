@@ -1,6 +1,7 @@
 import { loadEnv, defineConfig, Modules } from "@medusajs/framework/utils";
 import { GST_PROVIDER_ID } from "./src/modules/india-gst";
 import { RZP_PROVIDER_ID } from "./src/modules/razorpay";
+import { RESEND_PROVIDER_ID } from "./src/modules/resend";
 import { requireOrigins } from "./src/lib/cors";
 
 loadEnv(process.env.NODE_ENV || "development", process.cwd());
@@ -97,6 +98,44 @@ const fileProvider = S3_BUCKET
  */
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 
+/**
+ * Transactional e-mail.
+ *
+ * Resend needs an API key and a sender on a domain it has verified (docs/BACKEND-PLAN.md 17), so
+ * without a key the provider cannot be registered -- `validateOptions` in the service refuses it,
+ * and rightly, because a provider that cannot send makes every confirmation land on FAILURE with
+ * no symptom other than a customer who never heard from the shop.
+ *
+ * With no key the *local* provider takes the email channel instead and logs what it would have
+ * sent, which is what a laptop wants. The two are mutually exclusive, and not by preference:
+ * notification/dist/loaders/providers.js `validateProviders` throws at boot when two providers
+ * claim one channel. Leaving the channel unclaimed is equally wrong -- the loader then reaches for
+ * Medusa Cloud's hosted provider -- so exactly one of these is always present, always with an
+ * explicit `channels: ["email"]`.
+ */
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+
+const notificationProviders = RESEND_API_KEY
+  ? [
+      {
+        resolve: "./src/modules/resend",
+        id: RESEND_PROVIDER_ID,
+        options: {
+          channels: ["email"],
+          apiKey: RESEND_API_KEY,
+          from: process.env.RESEND_FROM,
+          replyTo: process.env.RESEND_REPLY_TO,
+        },
+      },
+    ]
+  : [
+      {
+        resolve: "@medusajs/medusa/notification-local",
+        id: "local",
+        options: { channels: ["email"] },
+      },
+    ];
+
 const paymentProviders = RAZORPAY_KEY_ID
   ? [
       {
@@ -144,7 +183,30 @@ module.exports = defineConfig({
     {
       key: Modules.EVENT_BUS,
       resolve: "@medusajs/medusa/event-bus-redis",
-      options: { redisUrl: REDIS_URL },
+      options: {
+        redisUrl: REDIS_URL,
+        // WITHOUT THIS, A SUBSCRIBER THAT THROWS IS NEVER RETRIED. `buildEvents` in
+        // event-bus-redis/dist/services/event-bus-redis.js defaults every job to `attempts: 1`,
+        // and the worker only retries when `configuredAttempts > 1`; on one attempt it logs
+        // "One or more subscribers of X failed. Retrying is not configured." and completes the
+        // job anyway. For an order confirmation that means a transient Resend outage loses the
+        // e-mail permanently, with nothing left in the queue to show for it.
+        //
+        // A retry re-runs only the subscribers that failed -- the worker persists
+        // `completedSubscriberIds` into the job data -- so raising this cannot double-send from
+        // a sibling subscriber that already succeeded.
+        //
+        // Five attempts at exponential backoff from 10s is roughly 10s, 20s, 40s, 80s: a ~150s
+        // window, long enough to ride out a provider blip and short enough that a customer who
+        // is still on the confirmation page gets their mail while they care about it.
+        jobOptions: {
+          attempts: 5,
+          backoff: { type: "exponential", delay: 10_000 },
+          // Failed jobs are kept for a week so a morning can start by reading them, but bounded
+          // -- the default keeps them forever, and an unbounded Redis set is its own outage.
+          removeOnFail: { age: 7 * 24 * 3600, count: 1000 },
+        },
+      },
     },
     {
       key: Modules.WORKFLOW_ENGINE,
@@ -180,22 +242,11 @@ module.exports = defineConfig({
       },
     },
     {
-      // Registered explicitly, and with an "email" channel, for a reason that is not obvious:
-      // notification/dist/loaders/providers.js:30 checks whether any provider claims the email
-      // channel, and if none does it tries to register Medusa Cloud's hosted email provider. This
-      // project does not use Medusa Cloud. In development the local provider logs the notification
-      // instead of sending it, which is the correct behaviour for a laptop.
+      // Registered explicitly, and always with something claiming the "email" channel: see
+      // `notificationProviders` above for why that is not optional in either direction.
       key: Modules.NOTIFICATION,
       resolve: "@medusajs/medusa/notification",
-      options: {
-        providers: [
-          {
-            resolve: "@medusajs/medusa/notification-local",
-            id: "local",
-            options: { channels: ["email"] },
-          },
-        ],
-      },
+      options: { providers: notificationProviders },
     },
     {
       // Payments are captured, not merely authorised: this store ships physical goods within days

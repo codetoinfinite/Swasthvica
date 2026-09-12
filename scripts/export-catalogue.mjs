@@ -28,7 +28,7 @@ const root = resolve(here, "..");
 const out = resolve(root, "medusa/src/data/catalogue.json");
 
 const { products } = await import(resolve(root, "src/lib/products.ts"));
-const { TERMS } = await import(resolve(root, "src/lib/business.ts"));
+const { BRAND, SUPPORT, TERMS, isPending } = await import(resolve(root, "src/lib/business.ts"));
 const { RULES } = await import(resolve(root, "src/lib/discounts.ts"));
 const { STATES } = await import(resolve(root, "src/lib/order.ts"));
 
@@ -71,12 +71,43 @@ function toPromotion(rule) {
   return out;
 }
 
+/**
+ * A fact only the client can supply comes out of business.ts wrapped in a loud amber marker, which
+ * is right on a page -- the gap is the checklist -- and wrong in an e-mail, where it would be
+ * quoted at a paying customer. `null` here, and the backend's templates omit the line entirely.
+ */
+const settled = (v) => (typeof v === "string" && v && !isPending(v) ? v : null);
+
 const snapshot = {
   $generated: "scripts/export-catalogue.mjs -- do not edit by hand",
   currency: "inr",
   terms: {
     shippingFlat: TERMS.shippingFlat,
     freeShippingAbove: TERMS.freeShippingAbove,
+  },
+  /**
+   * What the transactional e-mails quote. The same seam as the catalogue and the promotions: one
+   * author (src/lib/business.ts), one export, and no second copy for the backend to drift from.
+   * An e-mail that promised "2 business days" while /shipping promised three would be a support
+   * ticket at best and a chargeback argument at worst.
+   */
+  business: {
+    brand: BRAND,
+    support: {
+      email: settled(SUPPORT.email),
+      phone: settled(SUPPORT.phone),
+      hours: settled(SUPPORT.hours),
+      whatsapp: settled(SUPPORT.whatsapp),
+    },
+    terms: {
+      dispatchDays: settled(TERMS.dispatchDays),
+      deliveryMetro: settled(TERMS.deliveryMetro),
+      deliveryRest: settled(TERMS.deliveryRest),
+      deliveryRemote: settled(TERMS.deliveryRemote),
+      returnWindowDays: TERMS.returnWindowDays,
+      refundDays: settled(TERMS.refundDays),
+      courier: settled(TERMS.courier),
+    },
   },
   products: products.map((p) => {
     for (const k of ["slug", "name", "size", "status", "genericName"]) {
