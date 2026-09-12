@@ -10,10 +10,13 @@ import {
   login,
   registerIdentity,
   requestOrderTransfer,
+  requestPasswordReset,
+  resetPassword,
   updateAddress,
   updateCustomer,
   type AddressInput,
 } from "@/lib/account";
+import { checkPassword } from "@/lib/password";
 import { endSession, requireSession, startSession } from "@/lib/session";
 
 /* ------------------------------------------------------------------------------------------------
@@ -29,8 +32,6 @@ import { endSession, requireSession, startSession } from "@/lib/session";
 
 export type FormState = { error?: string; ok?: string };
 
-/** Long enough to be worth a password manager. Not a Medusa rule -- Medusa accepts anything. */
-const MIN_PASSWORD = 8;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE = /^\d{10}$/;
 const PIN = /^[1-9]\d{5}$/;
@@ -74,9 +75,8 @@ export async function signUp(_prev: FormState | undefined, form: FormData): Prom
 
   if (!name) return { error: "Tell us what to call you." };
   if (!EMAIL.test(email)) return { error: "That does not look like an e-mail address." };
-  if (password.length < MIN_PASSWORD) {
-    return { error: `Choose a password of at least ${MIN_PASSWORD} characters.` };
-  }
+  const complaint = checkPassword(password);
+  if (complaint) return { error: complaint };
   if (phone && !PHONE.test(phone)) return { error: "A phone number is ten digits, without +91." };
 
   let registration: string;
@@ -113,6 +113,90 @@ export async function signUp(_prev: FormState | undefined, form: FormData): Prom
 export async function signOut(): Promise<void> {
   await endSession();
   redirect("/");
+}
+
+/* --- forgotten passwords ---------------------------------------------------------------------- */
+
+/**
+ * Step one: ask for the e-mail with the link in it.
+ *
+ * The confirmation is deliberately conditional -- "if that address has an account" -- and is the
+ * same sentence whether or not one exists. Medusa answers 201 either way for exactly this reason,
+ * and a storefront that said "no account found" would hand anyone a way to test which of a list of
+ * addresses shops here.
+ */
+export async function requestReset(
+  _prev: FormState | undefined,
+  form: FormData,
+): Promise<FormState> {
+  const email = str(form, "email").toLowerCase();
+  if (!EMAIL.test(email)) return { error: "That does not look like an e-mail address." };
+
+  try {
+    await requestPasswordReset(email);
+  } catch (error) {
+    return failure(error, "We could not send that just now. Please try again in a moment.");
+  }
+  return {
+    ok:
+      "If that address has an account with us, a link is on its way. It works once, and for " +
+      "fifteen minutes.",
+  };
+}
+
+/**
+ * Step two: spend the link on a new password.
+ *
+ * The token and the address both arrive as hidden fields carried over from the query string, so
+ * neither is trusted: an absent token is caught here, a bad one is caught by Medusa, and the
+ * address is only ever used for the sign-in convenience at the end.
+ *
+ * THE SIGN-IN AT THE END MUST NOT BE ABLE TO UNDO THE CHANGE. By the time it runs the password
+ * really has changed and the link is spent, so a failure there is a failure of convenience only --
+ * hence the flag rather than a `redirect` inside the `try`, which `redirect` would throw straight
+ * through into the catch.
+ */
+export async function chooseNewPassword(
+  _prev: FormState | undefined,
+  form: FormData,
+): Promise<FormState> {
+  const token = str(form, "token");
+  const email = str(form, "email").toLowerCase();
+  // Trimmed by `str` exactly as it is on the sign-up and sign-in forms. Trimming in one place and
+  // not the other is how somebody sets a password they can then never type again.
+  const password = str(form, "password");
+  const confirm = str(form, "confirm");
+
+  if (!token) {
+    return {
+      error:
+        "That link is missing its code. Open the link in the e-mail again, or ask below for a " +
+        "fresh one.",
+    };
+  }
+  const complaint = checkPassword(password, confirm);
+  if (complaint) return { error: complaint };
+
+  try {
+    await resetPassword(token, password);
+  } catch (error) {
+    return failure(
+      error,
+      "We could not change the password. The link may already have been used -- ask below for a " +
+        "fresh one and try that.",
+    );
+  }
+
+  let signedIn = false;
+  if (EMAIL.test(email)) {
+    try {
+      await startSession(await login(email, password));
+      signedIn = true;
+    } catch {
+      // The password really did change; only signing straight in afterwards failed.
+    }
+  }
+  redirect(signedIn ? "/account" : "/account/login?reset=1");
 }
 
 /* --- the customer ----------------------------------------------------------------------------- */

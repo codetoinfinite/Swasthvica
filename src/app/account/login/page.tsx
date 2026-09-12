@@ -10,9 +10,9 @@ export const metadata: Metadata = {
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ next?: string }>;
+  searchParams: Promise<{ next?: string; reset?: string }>;
 }) {
-  const { next } = await searchParams;
+  const { next, reset } = await searchParams;
 
   // Sanitised here as well as in the action. The value is about to be written into the HTML, and a
   // query parameter anyone can set is not something to hand a browser unexamined.
@@ -23,7 +23,15 @@ export default async function LoginPage({
       title="Sign in"
       standfirst="Your orders, your saved addresses, and where each parcel has got to."
     >
-      <SignInForm next={safe} />
+      <SignInForm
+        next={safe}
+        notice={
+          // Set by the reset page when the password changed but signing straight in afterwards did
+          // not. Saying so here is the difference between "that worked" and wondering whether it
+          // did.
+          reset === "1" ? "Your password has been changed. Sign in with the new one." : undefined
+        }
+      />
     </AccountShell>
   );
 }

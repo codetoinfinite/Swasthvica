@@ -51,6 +51,16 @@ const LIMITS = {
   registerByEmail: { limit: 5, windowSeconds: 60 * 60 },
   /** Each reset attempt sends mail to the address. Unlimited means the address gets flooded. */
   resetByIdentifier: { limit: 5, windowSeconds: 60 * 60 },
+  /**
+   * Spending a reset token. A CPU budget rather than a guessing budget.
+   *
+   * The token is a signed JWT, so it is not guessable and the limit is not there to stop guessing.
+   * It is there because the route hashes whatever password it is handed with scrypt, which is
+   * deliberately expensive, and it accepts a body no validator has looked at. Sixty an hour is far
+   * beyond a storefront whose whole customer base resets a password a handful of times a month,
+   * and far below the rate at which a script could keep a core busy.
+   */
+  resetUpdateByIp: { limit: 60, windowSeconds: 60 * 60 },
   /** A cart is completed once. The allowance is for a payment that had to be retried. */
   completeByCart: { limit: 10, windowSeconds: 10 * 60 },
   /** Order-transfer accept/decline take a token in the body; this is the brute-force ceiling. */
@@ -146,6 +156,13 @@ export default defineMiddlewares({
         ]),
       ],
     },
+    {
+      // The other half of the reset. Address-only, because the body carries a password and a
+      // password is the one field that must never become a rate-limit key.
+      methods: ["POST"],
+      matcher: "/auth/customer/emailpass/update",
+      middlewares: [rateLimit([byIp("reset-update:ip", LIMITS.resetUpdateByIp)])],
+    },
 
     /* ---- Admin authentication -------------------------------------------------------------- */
     {
@@ -167,6 +184,13 @@ export default defineMiddlewares({
           byIp("admin-login:ip", LIMITS.adminLoginByIp),
         ]),
       ],
+    },
+    {
+      // Tighter than the storefront's, because these are real browser addresses rather than one
+      // server's, and because an admin password is worth more than a customer's.
+      methods: ["POST"],
+      matcher: "/auth/user/emailpass/update",
+      middlewares: [rateLimit([byIp("admin-reset-update:ip", LIMITS.adminLoginByIp)])],
     },
 
     /* ---- Checkout -------------------------------------------------------------------------- */

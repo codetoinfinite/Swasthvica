@@ -25,8 +25,12 @@ const GUESSABLE = [
   "/auth/customer/emailpass",
   "/auth/customer/emailpass/register",
   "/auth/customer/emailpass/reset-password",
+  // Not guessable -- the token is a signed JWT -- but limited all the same: the route hashes an
+  // unvalidated password with scrypt, so an unlimited one is a CPU tap rather than a way in.
+  "/auth/customer/emailpass/update",
   "/auth/user/emailpass",
   "/auth/user/emailpass/reset-password",
+  "/auth/user/emailpass/update",
   "/store/carts/:id/complete",
   "/store/orders/:id/transfer/accept",
   "/store/orders/:id/transfer/decline",
@@ -72,6 +76,16 @@ describe("middleware table", () => {
       expect(matcher).not.toContain(":");
       expect(matcher).not.toContain("*");
       expect(matcher).not.toBe("/auth/token/refresh");
+    }
+  });
+
+  it("keeps the password out of every rate-limit key", () => {
+    // A limiter keyed on a body field stores that field's value in Redis under a predictable key.
+    // On the two routes that carry a password, the only admissible identity is the address.
+    for (const matcher of ["/auth/customer/emailpass/update", "/auth/user/emailpass/update"]) {
+      const route = entry(matcher);
+      expect(route?.middlewares).toHaveLength(1);
+      expect(route?.middlewares?.[0]?.name).toBe("rateLimitMiddleware");
     }
   });
 

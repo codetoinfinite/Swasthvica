@@ -97,6 +97,27 @@ function statusOf(error: unknown): number | undefined {
   return typeof status === "number" ? status : undefined;
 }
 
+/**
+ * The backend's own rate limiter, translated.
+ *
+ * Every auth route here is behind `rateLimit` (medusa/src/api/middlewares.ts), and tripping it is
+ * not a bug -- it is a customer who mistyped a password six times, or two people on one office
+ * connection. Without this the caller logs it as an unexpected error and shows a sentence about
+ * trying again, which is exactly the advice that keeps the limiter closed.
+ *
+ * @returns an AccountError for a 429, and null for anything else, so the caller can write
+ *   `throw tooMany(error) ?? error` and leave its own cases alone.
+ */
+function tooMany(error: unknown): AccountError | null {
+  return statusOf(error) === 429
+    ? new AccountError(
+        "That is more attempts than we allow in a short space of time. Please wait a few minutes " +
+          "and try again.",
+        429,
+      )
+    : null;
+}
+
 /* --- auth ------------------------------------------------------------------------------------- */
 
 /**
@@ -130,7 +151,7 @@ export async function registerIdentity(email: string, password: string): Promise
         409,
       );
     }
-    throw error;
+    throw tooMany(error) ?? error;
   }
 }
 
@@ -152,7 +173,7 @@ export async function login(email: string, password: string): Promise<string> {
     if (statusOf(error) === 401) {
       throw new AccountError("That e-mail address and password do not match an account.", 401);
     }
-    throw error;
+    throw tooMany(error) ?? error;
   }
   if (res.verification_required || res.mfa_required) {
     throw new AccountError(
@@ -160,6 +181,67 @@ export async function login(email: string, password: string): Promise<string> {
     );
   }
   return res.token;
+}
+
+/* --- forgotten passwords ---------------------------------------------------------------------- */
+
+/**
+ * Ask Medusa to e-mail a reset link.
+ *
+ * Resolves whatever address it is given, and that is the security property rather than a
+ * shortcoming. The route runs its workflow with `throwOnError: false` and answers 201 either way --
+ * Medusa's own comment says this is "to avoid leaking information about non-existing identities" --
+ * so neither this function nor the person typing into the form can tell a registered address from
+ * an unregistered one.
+ *
+ * The `accept` override is load-bearing, not tidiness. The route ends in `res.sendStatus(201)`,
+ * which Express sends as a `text/plain` body of "Created", while the SDK parses the response as
+ * JSON whenever the request asked for JSON -- which its own default header always does. Left alone,
+ * a *successful* reset request throws a raw SyntaxError out of `resp.json()`. Asking for text makes
+ * the SDK hand back the untouched Response instead. Catching the SyntaxError was the alternative
+ * and was rejected: it would also swallow a genuinely malformed answer from a broken backend.
+ */
+export async function requestPasswordReset(email: string): Promise<void> {
+  try {
+    await call(`/auth/${ACTOR}/${PROVIDER}/reset-password`, {
+      method: "POST",
+      body: { identifier: email },
+      accept: "text/plain",
+    });
+  } catch (error) {
+    throw tooMany(error) ?? error;
+  }
+}
+
+/**
+ * Spend the token from that e-mail on a new password.
+ *
+ * THE EMPTY-PASSWORD GUARD IS THE IMPORTANT LINE. `EmailPassAuthService.update` returns
+ * `{ success: true }` without touching the stored hash when `password` is absent or is not a
+ * string, and the route reports that as a 200 -- so a customer would be told their password had
+ * changed while the old one still worked. `POST /auth/:actor_type/:auth_provider/update` carries no
+ * body validator of its own, so the storefront is the only place this can be caught.
+ *
+ * THE TOKEN IS SPENT BEFORE THE PASSWORD IS SET. `validateToken` consumes the single-use row
+ * atomically and only then runs the handler, so a failure anywhere after that point leaves the link
+ * dead as well as the password unchanged. Every message below therefore sends people back for a
+ * fresh link rather than telling them to try the one they have again.
+ */
+export async function resetPassword(resetToken: string, password: string): Promise<void> {
+  if (!password) throw new AccountError("Choose a password before saving it.");
+
+  try {
+    await post(`/auth/${ACTOR}/${PROVIDER}/update`, { password }, resetToken);
+  } catch (error) {
+    if (statusOf(error) === 401) {
+      throw new AccountError(
+        "That link has expired or has already been used. Ask for a fresh one below and we will " +
+          "send another.",
+        401,
+      );
+    }
+    throw tooMany(error) ?? error;
+  }
 }
 
 /* --- the customer ----------------------------------------------------------------------------- */
@@ -304,13 +386,29 @@ function post<T>(path: string, body: Record<string, unknown>, token?: string): P
 
 function call<T>(
   path: string,
-  init: { method?: string; body?: Record<string, unknown>; query?: Record<string, unknown> },
+  init: {
+    method?: string;
+    body?: Record<string, unknown>;
+    query?: Record<string, unknown>;
+    /**
+     * Overrides the SDK's default `application/json`, which is also what decides whether it parses
+     * the body at all. Only a route that answers 2xx with something other than JSON needs it --
+     * see requestPasswordReset for the one that does.
+     */
+    accept?: string;
+  },
   token?: string,
 ): Promise<T> {
+  const { accept, ...rest } = init;
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (accept) headers.accept = accept;
+
   return storeApi().client.fetch<T>(path, {
     cache: "no-store",
-    ...init,
-    // Merged last by the SDK's own header assembly, so this beats anything the client is holding.
-    ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
+    ...rest,
+    // Merged last by the SDK's own header assembly, case-insensitively, so these beat anything the
+    // shared client is holding -- which is the whole reason the token is passed per request.
+    ...(Object.keys(headers).length > 0 ? { headers } : {}),
   });
 }

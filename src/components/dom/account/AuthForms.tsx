@@ -4,6 +4,7 @@ import IntentLink from "@/components/dom/IntentLink";
 import { Field } from "@/components/dom/checkout/Field";
 import { Notice, Submit } from "@/components/dom/account/Form";
 import { signIn, signUp } from "@/app/account/actions";
+import { MIN_PASSWORD } from "@/lib/password";
 
 /**
  * Signing in and signing up.
@@ -17,12 +18,15 @@ import { signIn, signUp } from "@/app/account/actions";
  * tell "offer to save this" from "fill this in".
  */
 
-export function SignInForm({ next }: { next: string }) {
+export function SignInForm({ next, notice }: { next: string; notice?: string }) {
   const [state, action, pending] = useActionState(signIn, undefined);
 
   return (
     <form action={action} noValidate>
-      <Notice state={state} />
+      {/* The notice is what the page came here to say -- "your password has been changed" -- and it
+          is stood down the moment the form has an answer of its own, so a stale congratulation
+          never sits above a live error. */}
+      <Notice state={state ?? (notice ? { ok: notice } : undefined)} />
       {/* Carried through the form rather than read from the URL inside the action: a Server Action
           has no access to the page's query string. It is re-checked server-side all the same. */}
       <input type="hidden" name="next" value={next} />
@@ -45,6 +49,10 @@ export function SignInForm({ next }: { next: string }) {
         Sign in
       </Submit>
       <p className="mt-6 text-sm leading-relaxed text-cream-200/70">
+        <IntentLink href="/account/reset">Forgotten your password?</IntentLink> We will e-mail you a
+        link that sets a new one.
+      </p>
+      <p className="mt-3 text-sm leading-relaxed text-cream-200/70">
         No account yet? <IntentLink href="/account/register">Create one</IntentLink>. You do not
         need one to order — <IntentLink href="/shop">the shop</IntentLink> takes guests, and an
         order placed as a guest can be moved into an account afterwards.
@@ -83,9 +91,9 @@ export function SignUpForm() {
         name="password"
         type="password"
         autoComplete="new-password"
-        minLength={8}
+        minLength={MIN_PASSWORD}
         required
-        hint="At least eight characters."
+        hint={`At least ${MIN_PASSWORD} characters.`}
       />
       <Submit pending={pending} className="mt-2 w-full sm:w-auto">
         Create account
